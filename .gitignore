@@ -1,0 +1,9 @@
+.env
+docker-compose.sites.yml
+backup/sites.conf
+sites/*/
+!sites/_template_wordpress/
+!sites/_template_static/
+!sites/_admintools/
+*.pem
+*.key

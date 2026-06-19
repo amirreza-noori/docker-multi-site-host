@@ -1,0 +1,77 @@
+services:
+  example-com:
+    build:
+      # Absolute path required when SITES_DIR is outside this repository (e.g. /sites)
+      context: ../../wordpress
+      dockerfile: Dockerfile
+      args:
+        WORDPRESS_VERSION: "6.8"
+        WORDPRESS_LOCALE: fa_IR
+    image: wordpress-server:6.8-fa_IR
+    container_name: example-com
+    hostname: example.com
+    restart: always
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    env_file:
+      - ./etc/environment.yml
+    environment:
+      CONTAINER_NAME: example-com
+    volumes:
+      - ./wp-config.php:/app/wp-config.php
+      - ./.htaccess:/app/.htaccess
+      - ./themes:/app/wp-content/themes
+      - ./plugins:/app/wp-content/plugins
+      - ./uploads:/app/wp-content/uploads
+      - ./etc/php.ini:/opt/docker/etc/php/php.ini:ro
+      - ./etc/crontab:/etc/cron.d/docker-boilerplate:ro
+    extra_hosts:
+      - 'wordpress.org:0.0.0.0'
+      - 'api.wordpress.org:0.0.0.0'
+      - 'fa.wordpress.org:0.0.0.0'
+      - 'learn.wordpress.org:0.0.0.0'
+      - 'apps.wordpress.org:0.0.0.0'
+      - 'core.trac.wordpress.org:0.0.0.0'
+      - 'plugin.trac.wordpress.org:0.0.0.0'
+      - 'developer.woocommerce.com:0.0.0.0'
+      - 'bridge.unitedover.com:0.0.0.0'
+      - 'api.bitbucket.org:0.0.0.0'
+      - 'woocommerce.ir:0.0.0.0'
+      - 'woonotice.ir:0.0.0.0'
+      - 'woohash.ir:0.0.0.0'
+      - 'woocommerce.com:0.0.0.0'
+      - 'tracking.woocommerce.com:0.0.0.0'
+      - 'wordpressnull.org:0.0.0.0'
+      - 'plugins.svn.wordpress.org:0.0.0.0'
+      - 'graph.facebook.com:0.0.0.0'
+      - 'facebook.com:0.0.0.0'
+      - 'fonts.googleapis.com:0.0.0.0'
+      - 'rankmath.com:0.0.0.0'
+      - 'support.rankmath.com:0.0.0.0'
+      - 'elementor.com:0.0.0.0'
+      - 'go.elementor.com:0.0.0.0'
+      - 'my.elementor.com:0.0.0.0'
+      - 'ms-8874.elementor.com:0.0.0.0'
+      - 'planner.elementor.com:0.0.0.0'
+      - 'developers.elementor.com:0.0.0.0'
+      - 'elementor.atlassian.net:0.0.0.0'
+      - 'developers.google.com:0.0.0.0'
+      - 'standalonetech.com:0.0.0.0'
+      - 'php.net:0.0.0.0'
+      - 'wp-crontrol.com:0.0.0.0'
+      - 'wpastra.com:0.0.0.0'
+      - 'github.com:0.0.0.0'
+      - 'm.me:0.0.0.0'
+      - 'purl.org:0.0.0.0'
+    networks:
+      - www
+      - database
+    mem_limit: 1g
+    cpus: 1
+
+networks:
+  www:
+    name: www
+  database:
+    name: database

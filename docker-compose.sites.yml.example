@@ -1,0 +1,6 @@
+# After first `docker compose up -d --build`, uncomment and run `docker compose up -d` again.
+
+include: []
+
+# include:
+#   - path: ${SITES_DIR}/_admintools/docker-compose.yml

@@ -1,0 +1,130 @@
+services:
+  bootstrap:
+    build:
+      context: .
+      dockerfile: bootstrap/Dockerfile
+    image: bootstrap:latest
+    container_name: bootstrap
+    restart: "no"
+    environment:
+      REPO: /repo
+      SITES_DIR: /sites
+      MARIADB_DATA_DIR: /mariadb_data
+      LETSENCRYPT_DIR: /letsencrypt
+      BACKUP_DIR: /backup
+    volumes:
+      - .:/repo
+      - ${SITES_DIR:?Set SITES_DIR in .env}:/sites
+      - ${MARIADB_DATA_DIR:?Set MARIADB_DATA_DIR in .env}:/mariadb_data
+      - ${LETSENCRYPT_DIR:?Set LETSENCRYPT_DIR in .env}:/letsencrypt
+      - ${BACKUP_DIR:?Set BACKUP_DIR in .env}:/backup
+
+  haproxy:
+    build:
+      context: .
+      dockerfile: haproxy/Dockerfile
+    image: haproxy-wp:latest
+    container_name: haproxy
+    restart: always
+    user: root
+    environment:
+      SITES_DIR: /sites
+      HAPROXY_BASE_CFG: /usr/local/etc/haproxy/source/haproxy.cfg
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./haproxy:/usr/local/etc/haproxy/source:ro
+      - ${SITES_DIR:?Set SITES_DIR in .env}:/sites:ro
+      - ${LETSENCRYPT_DIR:?Set LETSENCRYPT_DIR in .env}:/etc/letsencrypt:ro
+    cap_add:
+      - NET_BIND_SERVICE
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+      certbot:
+        condition: service_healthy
+    networks:
+      - www
+
+  certbot:
+    build:
+      context: ./certbot
+    container_name: certbot
+    restart: always
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    environment:
+      SITES_DIR: /sites
+    volumes:
+      - ${SITES_DIR:?Set SITES_DIR in .env}:/sites:ro
+      - ${LETSENCRYPT_DIR:?Set LETSENCRYPT_DIR in .env}:/etc/letsencrypt:rw
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    healthcheck:
+      test: ["CMD", "test", "-f", "/etc/letsencrypt/haproxy/dummy.pem"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 15s
+    networks:
+      - www
+
+  mariadb:
+    image: mariadb:11.8
+    container_name: mariadb
+    restart: always
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    environment:
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:?Set MARIADB_ROOT_PASSWORD in .env}
+    volumes:
+      - ${MARIADB_DATA_DIR:?Set MARIADB_DATA_DIR in .env}:/var/lib/mysql
+      - ./mariadb/conf.d:/etc/mysql/mariadb.conf.d:ro
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - database
+
+  backup-runner:
+    build:
+      context: ./backup
+    image: backup-runner:latest
+    container_name: backup-runner
+    restart: always
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+      mariadb:
+        condition: service_healthy
+    environment:
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:?Set MARIADB_ROOT_PASSWORD in .env}
+      BACKUP_FTP_SERVER: ${BACKUP_FTP_SERVER:-}
+      BACKUP_FTP_USER: ${BACKUP_FTP_USER:-}
+      BACKUP_FTP_PASS: ${BACKUP_FTP_PASS:-}
+      BACKUP_FULL_HOUR: ${BACKUP_FULL_HOUR:-4}
+    volumes:
+      - ${SITES_DIR:?Set SITES_DIR in .env}:/sites:ro
+      - ./backup/sites.conf:/etc/backup/sites.conf:ro
+      - ${BACKUP_DIR:?Set BACKUP_DIR in .env}:/backup
+    networks:
+      - database
+
+networks:
+  www:
+    name: www
+  database:
+    name: database
+
+include:
+  - path: docker-compose.sites.yml
+    optional: true

@@ -1,0 +1,46 @@
+---
+description: Containerized WordPress server — architecture and conventions
+alwaysApply: true
+---
+
+# Project conventions
+
+## Architecture
+
+- Root `.env`: **required** `SITES_DIR`, `MARIADB_DATA_DIR`, `LETSENCRYPT_DIR`, `BACKUP_DIR`, `MARIADB_ROOT_PASSWORD`.
+- **bootstrap** creates `$SITES_DIR/_admintools/`, `$SITES_DIR/_template_wordpress/`, `$SITES_DIR/_template_static/`, and `docker-compose.sites.yml`.
+- `_admintools` compose is included via `docker-compose.sites.yml` (uncomment after first `up`).
+- Each site folder: one `haproxy.cfg` (ACLs above `## backend ##`, backends below) + optional `docker-compose.yml`.
+- Each site `docker-compose.yml`: **unique top-level service name** (same as folder/`container_name`); never reuse service names across sites.
+- HAProxy assemble: `_admintools` first, then site folders (skip `_template_wordpress/`, `_template_static/`).
+
+## haproxy.cfg (per site)
+
+```cfg
+    acl host_example hdr(host) -i example.com
+    use_backend example_backend if host_example
+
+## backend ##
+
+backend example_backend
+    mode http
+    server example-com example-com:80
+```
+
+## Adding a WordPress site
+
+1. `cp -r "$SITES_DIR/_template_wordpress" "$SITES_DIR/<folder>"`
+2. Edit compose, wp-config, haproxy.cfg, database.sql
+3. Add to `backup/sites.conf` and `docker-compose.sites.yml`
+4. `docker compose up -d` and `docker compose restart haproxy`
+
+## Adding a static site
+
+1. `cp -r "$SITES_DIR/_template_static" "$SITES_DIR/<folder>"`
+2. Edit compose (service name, container_name), haproxy.cfg, `public/`
+3. Add to `backup/sites.conf` (`<folder>|-|public||0|7`) and `docker-compose.sites.yml`
+4. `docker compose up -d` and `docker compose restart haproxy`
+
+## Language
+
+- All comments and config annotations in **English**.

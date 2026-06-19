@@ -1,0 +1,9 @@
+# webdevops/php-apache runtime (per site)
+WEB_DOCUMENT_ROOT=/app
+WEB_DOCUMENT_INDEX=index.php
+
+TYPO3_CONTEXT=Production/Docker
+SYMFONY_ENV=prod
+SYMFONY_DEBUG=0
+CAKE_ENV=prod
+YII_ENVIRONMENT=Production

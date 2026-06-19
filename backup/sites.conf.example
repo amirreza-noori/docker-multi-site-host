@@ -1,0 +1,21 @@
+# Per-site backup rules (one line per site).
+# Copy: cp backup/sites.conf.example backup/sites.conf
+#
+# Format:
+#   folder|database|paths|ignore|db_interval_min|files_interval_days
+#
+# folder              — site directory name under SITES_DIR
+# database            — MariaDB database name (- if db backup disabled)
+# paths               — comma-separated folders to zip (- if files backup disabled)
+# ignore              — space-separated zip exclude patterns (optional)
+# db_interval_min     — database backup every N minutes; 0/off = disabled
+# files_interval_days — files backup every N days (checked at BACKUP_FULL_HOUR); 0/off = disabled
+#
+# All six fields are required. Omitted intervals default to disabled (0).
+#
+# Examples:
+# example-com|example_com_wp|themes,plugins,uploads|uploads/cache/*|10|1
+# archive-site|archive_wp|themes,plugins,uploads||1440|30
+# db-only|example_com_wp|-|-|10|0
+# files-only|example_com_wp|themes,plugins,uploads||0|7
+# static-site|-|public||0|7

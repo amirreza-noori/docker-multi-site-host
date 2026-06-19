@@ -1,0 +1,29 @@
+services:
+  portainer:
+    image: portainer/portainer-ce:latest
+    container_name: portainer
+    restart: always
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - portainer_data:/data
+    networks:
+      - www
+
+  phpmyadmin:
+    image: phpmyadmin/phpmyadmin:latest
+    container_name: phpmyadmin
+    restart: always
+    environment:
+      PMA_ARBITRARY: "1"
+    networks:
+      - database
+      - www
+
+volumes:
+  portainer_data:
+
+networks:
+  www:
+    name: www
+  database:
+    name: database
