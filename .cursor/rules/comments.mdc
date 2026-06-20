@@ -1,0 +1,48 @@
+---
+description: Comment style — explain what, not how; omit when obvious
+alwaysApply: true
+---
+
+# Comments
+
+All comments in **English**.
+
+## Purpose
+
+A comment names **what a section is for** (role, domain, constraint) so someone new to the file understands it without reading the implementation.
+
+## Do not
+
+- Describe **code flow** (what happens next, step order, “then we…”, “after this…”).
+- Narrate **changes** (“formerly…”, “we added…”, “old value was…”).
+- Restate what the code already says (`i++ // increment i`).
+
+## When to skip
+
+No comment if the name, structure, or config key is already clear.
+
+## Examples
+
+```yaml
+# ❌ Old single-server values were 150 — reduced because we hit OOM
+fpm.pool.pm.max_children=20
+
+# ✅ PHP-FPM pool sizing for this site container (see compose mem_limit)
+fpm.pool.pm.max_children=20
+```
+
+```cfg
+# ❌ Do NOT use plain :443 without ssl — that sends HTTP to SSL port
+server app app:443 ssl verify none
+
+# ✅ HAProxy → app container over HTTPS; browser TLS ends at HAProxy (certbot)
+server app app:443 ssl verify none
+```
+
+```php
+// ❌ One-off export only — raise if you still hit memory limits
+const MIGRATION_MEMORY_LIMIT = '2048M';
+
+// (no comment — constant name is enough)
+const MIGRATION_MEMORY_LIMIT = '2048M';
+```

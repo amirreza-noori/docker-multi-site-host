@@ -1,6 +1,5 @@
 #!/bin/sh
-# Merge base haproxy.cfg + per-site haproxy.cfg (split at ## backend ##).
-# Validates on every start; saves backup on success; falls back to backup on failure.
+# Assembled HAProxy config: base + per-site haproxy.cfg fragments
 set -eu
 
 BASE="${HAPROXY_BASE_CFG:-/usr/local/etc/haproxy/source/haproxy.cfg}"

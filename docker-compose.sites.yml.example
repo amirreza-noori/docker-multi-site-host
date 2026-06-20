@@ -1,4 +1,4 @@
-# After first `docker compose up -d --build`, uncomment and run `docker compose up -d` again.
+# Per-site compose files merged into the root stack (see README)
 
 include: []
 

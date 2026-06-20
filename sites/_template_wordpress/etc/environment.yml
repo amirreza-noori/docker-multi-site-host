@@ -1,9 +1,19 @@
-# webdevops/php-apache runtime (per site)
+# webdevops/php-apache runtime — loaded via docker-compose env_file
+
 WEB_DOCUMENT_ROOT=/app
 WEB_DOCUMENT_INDEX=index.php
+CLI_SCRIPT=php /app/index.php
 
-TYPO3_CONTEXT=Production/Docker
-SYMFONY_ENV=prod
-SYMFONY_DEBUG=0
-CAKE_ENV=prod
-YII_ENVIRONMENT=Production
+
+# PHP-FPM pool sizing (align with docker-compose mem_limit, typically 1g)
+fpm.global.process_control_timeout=10m
+fpm.global.process.max=50
+
+fpm.pool.pm=dynamic
+fpm.pool.pm.max_children=20
+fpm.pool.pm.start_servers=6
+fpm.pool.pm.min_spare_servers=4
+fpm.pool.pm.max_spare_servers=12
+fpm.pool.pm.process_idle_timeout=5m
+fpm.pool.pm.max_requests=1000
+fpm.pool.request_terminate_timeout=5m

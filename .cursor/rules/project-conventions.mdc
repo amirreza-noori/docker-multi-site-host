@@ -44,3 +44,4 @@ backend example_backend
 ## Language
 
 - All comments and config annotations in **English**.
+- Follow `.cursor/rules/comments.mdc` (what a section is for; no flow narration; omit if obvious).

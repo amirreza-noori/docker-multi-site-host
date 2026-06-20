@@ -1,5 +1,5 @@
 [mysqld]
-# High limit for multi-site WordPress (replaces the former max_connections=200 cap)
+# Connection limit for all site containers on shared MariaDB
 max_connections = 10000
 
 innodb_buffer_pool_size = 3G
