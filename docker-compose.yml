@@ -42,8 +42,6 @@ services:
     depends_on:
       bootstrap:
         condition: service_completed_successfully
-      certbot:
-        condition: service_healthy
     networks:
       - www
 
@@ -124,6 +122,8 @@ networks:
     name: www
   database:
     name: database
+  database-monitor:
+    name: database-monitor
 
 include:
   - path: docker-compose.sites.yml

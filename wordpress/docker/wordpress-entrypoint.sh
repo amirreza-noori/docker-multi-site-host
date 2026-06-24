@@ -25,7 +25,25 @@ if [ ! -f "${WP_CONFIG}" ] && [ -f "${WP_PATH}/wp-config-sample.php" ]; then
   fi
 
   chown application:application "${WP_CONFIG}"
+  chmod 644 "${WP_CONFIG}"
 fi
+
+fix_mount_file() {
+  f=$1
+  if [ -f "$f" ]; then
+    chown application:application "$f"
+    chmod 644 "$f"
+  fi
+}
+
+OC="${WP_PATH}/wp-content/object-cache.php"
+if [ -d "$OC" ]; then
+  echo "ERROR: $OC is a directory on the host — remove it and add object-cache.php as a file" >&2
+  exit 1
+fi
+fix_mount_file "$OC"
+fix_mount_file "${WP_PATH}/.htaccess"
+fix_mount_file "${WP_CONFIG}"
 
 if [ "$#" -eq 0 ]; then
   set -- supervisord

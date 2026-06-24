@@ -1,11 +1,19 @@
 # syntax=docker/dockerfile:1
-FROM webdevops/php-apache:8.4
+ARG PHP_VERSION=8.4
+FROM webdevops/php-apache:${PHP_VERSION}
 
+ARG PHP_VERSION
 ENV PROVISION_CONTEXT=production
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     set -eux; \
+    if [ "${PHP_VERSION}" = "7.4" ]; then \
+      sed -i 's|deb.debian.org/debian|archive.debian.org/debian|g' /etc/apt/sources.list; \
+      sed -i 's|security.debian.org/debian-security|archive.debian.org/debian-security|g' /etc/apt/sources.list; \
+      sed -i '/buster-updates/d' /etc/apt/sources.list; \
+      printf '%s\n' 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99no-check-valid-until; \
+    fi; \
     apt-get update; \
     apt-get install -y --no-install-recommends unzip; \
     rm -rf /var/lib/apt/lists/*; \

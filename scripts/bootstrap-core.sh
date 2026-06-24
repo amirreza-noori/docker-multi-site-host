@@ -9,7 +9,16 @@ MARIADB_DATA_DIR="${MARIADB_DATA_DIR:?MARIADB_DATA_DIR is required}"
 LETSENCRYPT_DIR="${LETSENCRYPT_DIR:?LETSENCRYPT_DIR is required}"
 BACKUP_DIR="${BACKUP_DIR:?BACKUP_DIR is required}"
 
-mkdir -p "$MARIADB_DATA_DIR" "$LETSENCRYPT_DIR" "$BACKUP_DIR"
+mkdir -p "$MARIADB_DATA_DIR" "$LETSENCRYPT_DIR" "$BACKUP_DIR" "$LETSENCRYPT_DIR/haproxy"
+
+if [ ! -f "$LETSENCRYPT_DIR/haproxy/dummy.pem" ]; then
+  openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+    -keyout "$LETSENCRYPT_DIR/haproxy/dummy.pem.key" \
+    -out "$LETSENCRYPT_DIR/haproxy/dummy.pem" \
+    -subj "/C=US/ST=State/L=City/O=Organization/OU=Unit/CN=localhost"
+  chmod 644 "$LETSENCRYPT_DIR/haproxy/dummy.pem" "$LETSENCRYPT_DIR/haproxy/dummy.pem.key"
+  echo "Created $LETSENCRYPT_DIR/haproxy/dummy.pem"
+fi
 
 install_site_template() {
   src_name=$1

@@ -17,6 +17,7 @@ services:
       PMA_ARBITRARY: "1"
     networks:
       - database
+      - database-monitor
       - www
 
 volumes:
@@ -27,3 +28,5 @@ networks:
     name: www
   database:
     name: database
+  database-monitor:
+    name: database-monitor

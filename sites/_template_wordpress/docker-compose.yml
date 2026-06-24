@@ -7,6 +7,10 @@ services:
       args:
         WORDPRESS_VERSION: "6.8"
         WORDPRESS_LOCALE: fa_IR
+        # PHP 7.4: uncomment
+        # PHP_VERSION: "7.4"
+    # PHP 7.4: uncomment and comment out the image line below
+    # image: wordpress-server:6.8-fa_IR-php7.4
     image: wordpress-server:6.8-fa_IR
     container_name: example-com
     hostname: example.com
@@ -24,6 +28,7 @@ services:
       - ./themes:/app/wp-content/themes
       - ./plugins:/app/wp-content/plugins
       - ./uploads:/app/wp-content/uploads
+      - ./object-cache.php:/app/wp-content/object-cache.php
       - ./etc/php.ini:/opt/docker/etc/php/php.ini:ro
       - ./etc/crontab:/etc/cron.d/docker-boilerplate:ro
     extra_hosts:

@@ -13,6 +13,7 @@ alwaysApply: true
 - Each site folder: one `haproxy.cfg` (ACLs above `## backend ##`, backends below) + optional `docker-compose.yml`.
 - Each site `docker-compose.yml`: **unique top-level service name** (same as folder/`container_name`); never reuse service names across sites.
 - HAProxy assemble: `_admintools` first, then site folders (skip `_template_wordpress/`, `_template_static/`).
+- **Networks:** `database` = MariaDB, WordPress, backup-runner, phpMyAdmin. `database-monitor` = extra network on phpMyAdmin only; external DBs for inspection join this network, not `database`.
 
 ## haproxy.cfg (per site)
 
@@ -30,7 +31,7 @@ backend example_backend
 ## Adding a WordPress site
 
 1. `cp -r "$SITES_DIR/_template_wordpress" "$SITES_DIR/<folder>"`
-2. Edit compose, wp-config, haproxy.cfg, database.sql
+2. Edit compose (for PHP 7.4: uncomment `PHP_VERSION` and alternate `image` line), wp-config, haproxy.cfg, database.sql
 3. Add to `backup/sites.conf` and `docker-compose.sites.yml`
 4. `docker compose up -d` and `docker compose restart haproxy`
 

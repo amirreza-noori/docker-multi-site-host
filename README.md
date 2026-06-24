@@ -6,6 +6,8 @@ Multi-site WordPress on one server: shared MariaDB, HAProxy with automatic SSL, 
 
 Each folder under `SITES_DIR` has one `haproxy.cfg` (frontend + backend, split by `## backend ##`) and optionally `docker-compose.yml`.
 
+**Docker networks:** `database` — production MariaDB, WordPress sites, backup-runner, phpMyAdmin. `database-monitor` — optional extra network on phpMyAdmin only; attach external DBs here for inspection (never add external MariaDB to `database`).
+
 ## First-time setup
 
 1. Fill `.env`, then `docker compose up -d --build`
@@ -18,10 +20,11 @@ Each folder under `SITES_DIR` has one `haproxy.cfg` (frontend + backend, split b
 1. `cp -r "$SITES_DIR/_template_wordpress" "$SITES_DIR/my-site"`
 2. Edit `docker-compose.yml` — **rename the service key** from `example-com` to `my-site` (must match `container_name`; each site needs a unique service name)
 3. Set `build.context` to the repo `wordpress/` directory (absolute path when `SITES_DIR` is outside the repo)
-4. Edit `wp-config.php`, `haproxy.cfg`, `database.sql`
-5. Add to `backup/sites.conf` and `docker-compose.sites.yml`
-6. `docker compose up -d`
-7. `docker compose restart haproxy`
+4. For PHP 7.4: uncomment `build.args.PHP_VERSION` and the alternate `image` line in `docker-compose.yml`
+5. Edit `wp-config.php`, `haproxy.cfg`, `database.sql`
+6. Add to `backup/sites.conf` and `docker-compose.sites.yml`
+7. `docker compose up -d`
+8. `docker compose restart haproxy`
 
 ## Add a static site
 

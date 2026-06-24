@@ -14,7 +14,7 @@
 # All six fields are required. Omitted intervals default to disabled (0).
 #
 # Examples:
-# example-com|example_com_wp|themes,plugins,uploads|uploads/cache/*|10|1
+# example-com|example_com_wp|themes,plugins,uploads,object-cache.php||10|1
 # archive-site|archive_wp|themes,plugins,uploads||1440|30
 # db-only|example_com_wp|-|-|10|0
 # files-only|example_com_wp|themes,plugins,uploads||0|7

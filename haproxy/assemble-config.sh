@@ -3,10 +3,10 @@
 set -eu
 
 BASE="${HAPROXY_BASE_CFG:-/usr/local/etc/haproxy/source/haproxy.cfg}"
-OUT="${HAPROXY_RUNTIME_CFG:-/tmp/haproxy.running.cfg}"
-BACKUP="${HAPROXY_BACKUP_CFG:-/var/lib/haproxy/assembled.cfg.bak}"
+OUT="${HAPROXY_RUNTIME_CFG:-/tmp/haproxy/running.cfg}"
 SITES="${SITES_DIR:-/sites}"
-NEW="/tmp/haproxy.assembled.new"
+RUNTIME_DIR=$(dirname "$OUT")
+NEW="${RUNTIME_DIR}/assembled.new"
 FRONT_PART=$(mktemp)
 BACK_PART=$(mktemp)
 CHECK_ERR=$(mktemp)
@@ -37,12 +37,6 @@ validate_cfg() {
     log "Config check failed:"
     cat "$CHECK_ERR" >&2
     return 1
-}
-
-start_haproxy() {
-    cfg=$1
-    log "Starting HAProxy with $cfg"
-    exec /usr/local/sbin/haproxy -W -db -f "$cfg"
 }
 
 finalize_cfg() {
@@ -76,66 +70,58 @@ append_site() {
     split_back "$site_cfg" >> "$BACK_PART"
 }
 
+assemble_sites() {
+    : > "$FRONT_PART"
+    : > "$BACK_PART"
+
+    log "Assembling config from $SITES"
+
+    if [ -f "${SITES}/_admintools/haproxy.cfg" ]; then
+        append_site "${SITES}/_admintools/haproxy.cfg"
+    fi
+
+    for site_dir in "$SITES"/*/; do
+        [ -d "$site_dir" ] || continue
+        case "$site_dir" in
+            */_template_wordpress/|*/_template_static/|*/_admintools/) continue ;;
+        esac
+        site_cfg="${site_dir}haproxy.cfg"
+        [ -f "$site_cfg" ] || continue
+        append_site "$site_cfg"
+    done
+
+    if ! {
+        sed 's/\r$//' "$BASE" | sed '/# @@INCLUDE_FRONT@@/,$d'
+        cat "$FRONT_PART"
+        sed 's/\r$//' "$BASE" | sed -n '/# @@INCLUDE_FRONT@@/,/# @@INCLUDE_BACK@@/p' | sed '1d;$d'
+        cat "$BACK_PART"
+        sed 's/\r$//' "$BASE" | sed -n '/# @@INCLUDE_BACK@@/,$p' | tail -n +2
+    } > "$NEW"; then
+        log "ERROR: Failed to merge config files"
+        return 1
+    fi
+
+    finalize_cfg "$NEW"
+    bytes=$(wc -c < "$NEW" | tr -d ' ')
+    log "Merged config written ($bytes bytes)"
+}
+
 if [ ! -f "$BASE" ]; then
     log "ERROR: Base config not found: $BASE"
     exit 1
 fi
 
-mkdir -p "$(dirname "$BACKUP")"
+mkdir -p "$RUNTIME_DIR"
 
-: > "$FRONT_PART"
-: > "$BACK_PART"
-
-log "Assembling config from $SITES"
-
-if [ -f "${SITES}/_admintools/haproxy.cfg" ]; then
-    append_site "${SITES}/_admintools/haproxy.cfg"
-fi
-
-for site_dir in "$SITES"/*/; do
-    [ -d "$site_dir" ] || continue
-    case "$site_dir" in
-        */_template_wordpress/|*/_template_static/|*/_admintools/) continue ;;
-    esac
-    site_cfg="${site_dir}haproxy.cfg"
-    [ -f "$site_cfg" ] || continue
-    append_site "$site_cfg"
-done
-
-if ! {
-    sed 's/\r$//' "$BASE" | sed '/# @@INCLUDE_FRONT@@/,$d'
-    cat "$FRONT_PART"
-    sed 's/\r$//' "$BASE" | sed -n '/# @@INCLUDE_FRONT@@/,/# @@INCLUDE_BACK@@/p' | sed '1d;$d'
-    cat "$BACK_PART"
-    sed 's/\r$//' "$BASE" | sed -n '/# @@INCLUDE_BACK@@/,$p' | tail -n +2
-} > "$NEW"; then
-    log "ERROR: Failed to merge config files"
+if ! assemble_sites; then
     exit 1
 fi
 
-bytes=$(wc -c < "$NEW" | tr -d ' ')
-finalize_cfg "$NEW"
-log "Merged config written ($bytes bytes)"
-
-if validate_cfg "$NEW"; then
-    cp "$NEW" "$OUT"
-    cp "$NEW" "$BACKUP"
-    log "OK: validated; backup saved to $BACKUP"
-    start_haproxy "$OUT"
-fi
-
-log "Assembled config is invalid; checking for previous backup at $BACKUP"
-
-if [ ! -f "$BACKUP" ]; then
-    log "ERROR: No previous successful config backup found — fix site haproxy.cfg and restart haproxy"
+if ! validate_cfg "$NEW"; then
+    log "ERROR: Assembled config is invalid — fix site haproxy.cfg and restart haproxy"
     exit 1
 fi
 
-if validate_cfg "$BACKUP"; then
-    cp "$BACKUP" "$OUT"
-    log "WARN: Using previous backup — fix site haproxy.cfg and restart haproxy"
-    start_haproxy "$OUT"
-fi
-
-log "ERROR: Previous backup exists but is invalid — fix site haproxy.cfg and restart haproxy"
-exit 1
+cp "$NEW" "$OUT"
+log "Starting HAProxy with $OUT"
+exec /usr/local/sbin/haproxy -W -db -f "$OUT"
