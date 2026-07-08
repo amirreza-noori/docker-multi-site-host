@@ -124,8 +124,11 @@ services:
       SECOND_IP_SSH_HOST: ${SECOND_IP_SSH_HOST:?Set SECOND_IP_SSH_HOST in .env}
       SECOND_IP_SSH_PORT: ${SECOND_IP_SSH_PORT:-22}
       SECOND_IP_SSH_USER: ${SECOND_IP_SSH_USER:?Set SECOND_IP_SSH_USER in .env}
+      SECOND_IP_REVERSE_PORTS: ${SECOND_IP_REVERSE_PORTS:-}
     volumes:
       - ${SECOND_IP_SSH_KEY_PATH:?Set SECOND_IP_SSH_KEY_PATH in .env}:/run/secrets/ssh_key:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks:
       - www
 

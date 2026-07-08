@@ -12,7 +12,7 @@ COPY privoxy.config /etc/privoxy/config
 COPY entrypoint.sh /entrypoint.sh
 
 RUN sed -i 's/\r$//' /entrypoint.sh \
-    && sed -i '1s/^\xEF\xBB\xBF//' /entrypoint.sh \
+    && if [ "$(head -c 3 /entrypoint.sh | od -An -t x1 | tr -d ' \n')" = "efbbbf" ]; then tail -c +4 /entrypoint.sh > /tmp/entrypoint.sh && mv /tmp/entrypoint.sh /entrypoint.sh; fi \
     && chmod +x /entrypoint.sh
 
 ENTRYPOINT ["/bin/bash", "/entrypoint.sh"]
