@@ -59,12 +59,6 @@ services:
       - ${SITES_DIR:?Set SITES_DIR in .env}:/sites:ro
       - ${LETSENCRYPT_DIR:?Set LETSENCRYPT_DIR in .env}:/etc/letsencrypt:rw
       - /var/run/docker.sock:/var/run/docker.sock:ro
-    healthcheck:
-      test: ["CMD", "test", "-f", "/etc/letsencrypt/haproxy/dummy.pem"]
-      interval: 2s
-      timeout: 3s
-      retries: 30
-      start_period: 15s
     networks:
       - www
 
@@ -116,6 +110,24 @@ services:
       - ${BACKUP_DIR:?Set BACKUP_DIR in .env}:/backup
     networks:
       - database
+
+  secondary-egress:
+    build:
+      context: ./secondary-egress
+    image: secondary-egress:latest
+    container_name: secondary-egress
+    restart: always
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    environment:
+      SECOND_IP_SSH_HOST: ${SECOND_IP_SSH_HOST:?Set SECOND_IP_SSH_HOST in .env}
+      SECOND_IP_SSH_PORT: ${SECOND_IP_SSH_PORT:-22}
+      SECOND_IP_SSH_USER: ${SECOND_IP_SSH_USER:?Set SECOND_IP_SSH_USER in .env}
+    volumes:
+      - ${SECOND_IP_SSH_KEY_PATH:?Set SECOND_IP_SSH_KEY_PATH in .env}:/run/secrets/ssh_key:ro
+    networks:
+      - www
 
 networks:
   www:

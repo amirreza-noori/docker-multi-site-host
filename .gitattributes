@@ -1,2 +1,3 @@
 *.sh text eol=lf
+secondary-egress/** text eol=lf
 .gitattributes text eol=lf

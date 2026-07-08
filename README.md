@@ -57,3 +57,13 @@ docker compose up -d --build
 docker compose restart haproxy
 docker compose restart backup-runner
 ```
+
+## Second IP egress service
+
+Optional. Containers on `www` can send outbound HTTP requests via your second server IP.
+
+1. Docker host: `ssh-keygen -t ed25519 -f /root/.ssh/secondary-egress -N ""` → `SECOND_IP_SSH_KEY_PATH=/root/.ssh/secondary-egress`
+2. Target server: `mkdir -p ~/.ssh && chmod 700 ~/.ssh && echo 'PASTE_PUBLIC_KEY' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys` (`PASTE_PUBLIC_KEY` = contents of `secondary-egress.pub` from the Docker host)
+3. Fill the `SECOND_IP_*` variables in `.env` (see `.env.example`)
+4. `docker compose up -d --build secondary-egress`
+5. Use HTTP proxy `http://secondary-egress:8118` from containers on `www`
