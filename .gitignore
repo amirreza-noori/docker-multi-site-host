@@ -1,4 +1,5 @@
 .env
+secondary-egress/second-server/reverse-tunnel.env
 docker-compose.sites.yml
 backup/sites.conf
 sites/*/

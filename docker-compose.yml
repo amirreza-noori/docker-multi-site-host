@@ -103,13 +103,17 @@ services:
       BACKUP_FTP_SERVER: ${BACKUP_FTP_SERVER:-}
       BACKUP_FTP_USER: ${BACKUP_FTP_USER:-}
       BACKUP_FTP_PASS: ${BACKUP_FTP_PASS:-}
+      BACKUP_FTP_PROXY: ${BACKUP_FTP_PROXY:-}
       BACKUP_FULL_HOUR: ${BACKUP_FULL_HOUR:-4}
     volumes:
       - ${SITES_DIR:?Set SITES_DIR in .env}:/sites:ro
       - ./backup/sites.conf:/etc/backup/sites.conf:ro
       - ${BACKUP_DIR:?Set BACKUP_DIR in .env}:/backup
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks:
       - database
+      - www
 
   secondary-egress:
     build:
@@ -121,6 +125,9 @@ services:
       bootstrap:
         condition: service_completed_successfully
     environment:
+      SECOND_IP_EGRESS_MODE: ${SECOND_IP_EGRESS_MODE:-outbound}
+      SECOND_IP_INBOUND_PROXY_HOST: ${SECOND_IP_INBOUND_PROXY_HOST:-host.docker.internal}
+      SECOND_IP_INBOUND_PROXY_PORT: ${SECOND_IP_INBOUND_PROXY_PORT:-18118}
       SECOND_IP_SSH_HOST: ${SECOND_IP_SSH_HOST:?Set SECOND_IP_SSH_HOST in .env}
       SECOND_IP_SSH_PORT: ${SECOND_IP_SSH_PORT:-22}
       SECOND_IP_SSH_USER: ${SECOND_IP_SSH_USER:?Set SECOND_IP_SSH_USER in .env}

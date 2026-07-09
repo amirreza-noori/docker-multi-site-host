@@ -8,6 +8,7 @@ RUN apk add --no-cache \
     privoxy
 
 COPY haproxy.cfg /etc/haproxy/haproxy.cfg
+COPY haproxy-inbound.cfg /etc/haproxy/haproxy-inbound.cfg
 COPY privoxy.config /etc/privoxy/config
 COPY entrypoint.sh /entrypoint.sh
 

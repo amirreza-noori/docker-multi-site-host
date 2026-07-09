@@ -1,0 +1,15 @@
+[Unit]
+Description=Reverse SSH tunnel to Docker host
+After=network-online.target privoxy.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+EnvironmentFile=/etc/reverse-tunnel.env
+ExecStart=/bin/bash /usr/local/bin/reverse-tunnel.sh
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

@@ -9,6 +9,7 @@ MARIADB_ROOT_PASSWORD="${MARIADB_ROOT_PASSWORD:?MARIADB_ROOT_PASSWORD is require
 BACKUP_FTP_SERVER="${BACKUP_FTP_SERVER:-}"
 BACKUP_FTP_USER="${BACKUP_FTP_USER:-}"
 BACKUP_FTP_PASS="${BACKUP_FTP_PASS:-}"
+BACKUP_FTP_PROXY="${BACKUP_FTP_PROXY:-}"
 BACKUP_FULL_HOUR="${BACKUP_FULL_HOUR:-4}"
 
 mkdir -p "$BACKUP_DIR"
@@ -23,16 +24,35 @@ is_disabled() {
     esac
 }
 
+ftp_remote_path() {
+    local file=$1
+    echo "${file#"$BACKUP_DIR"/}"
+}
+
+ftp_curl() {
+    local -a opts=( -s --ftp-skip-pasv-ip )
+    if [ -n "$BACKUP_FTP_PROXY" ]; then
+        opts+=( --proxy "$BACKUP_FTP_PROXY" )
+    fi
+    curl "${opts[@]}" "$@"
+}
+
 ftp_upload() {
     local file=$1
-    curl -s -T "$file" --user "$BACKUP_FTP_USER:$BACKUP_FTP_PASS" \
-        "ftp://$BACKUP_FTP_SERVER/" -o /dev/null -w "UPLOAD %{http_code}\n"
+    local remote_path
+    remote_path=$(ftp_remote_path "$file")
+    ftp_curl --ftp-create-dirs -T "$file" --user "$BACKUP_FTP_USER:$BACKUP_FTP_PASS" \
+        "ftp://$BACKUP_FTP_SERVER/$remote_path" -o /dev/null -w "UPLOAD $remote_path %{http_code}\n"
 }
 
 ftp_delete() {
     local file=$1
-    curl -s -u "$BACKUP_FTP_USER:$BACKUP_FTP_PASS" "ftp://$BACKUP_FTP_SERVER" \
-        -Q "-DELE $(basename "$file")" -o /dev/null -w "DELETE $file %{http_code}\n"
+    local remote_path remote_dir remote_name
+    remote_path=$(ftp_remote_path "$file")
+    remote_dir=$(dirname "$remote_path")
+    remote_name=$(basename "$remote_path")
+    ftp_curl -u "$BACKUP_FTP_USER:$BACKUP_FTP_PASS" "ftp://$BACKUP_FTP_SERVER/$remote_dir/" \
+        -Q "-DELE $remote_name" -o /dev/null -w "DELETE $remote_path %{http_code}\n"
 }
 
 last_backup_epoch() {
