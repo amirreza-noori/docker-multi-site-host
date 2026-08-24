@@ -1,0 +1,186 @@
+#!/usr/bin/env python3
+"""Postfix policy service: per-account daily quotas (anti-abuse)."""
+
+from __future__ import annotations
+
+import os
+import sqlite3
+import sys
+import traceback
+from datetime import date
+from pathlib import Path
+
+DB_PATH = Path(os.environ.get("MAIL_SMTP_QUOTA_DB", "/var/lib/mail-smtp/quota.db"))
+# Quotas only — must be readable by the spawn user (nobody). No secrets here.
+QUOTA_FILE = Path(os.environ.get("MAIL_SMTP_QUOTA_FILE", "/etc/mail-smtp/quota.conf"))
+ENV_FILE = Path(os.environ.get("MAIL_SMTP_ENV", "/etc/mail-smtp/mail-smtp.env"))
+
+
+def load_kv(path: Path) -> dict[str, str]:
+    out: dict[str, str] = {}
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return out
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, val = line.split("=", 1)
+        out[key.strip()] = val.strip().strip('"').strip("'")
+    return out
+
+
+def load_quotas() -> tuple[int, int]:
+    cfg = load_kv(QUOTA_FILE)
+    if not cfg:
+        # Fall back to main env only for quota keys (may be unreadable → defaults)
+        cfg = load_kv(ENV_FILE)
+    msg_quota = int(cfg.get("DAILY_MESSAGE_QUOTA", "100"))
+    rcpt_quota = int(cfg.get("DAILY_RECIPIENT_QUOTA", "200"))
+    return msg_quota, rcpt_quota
+
+
+def db_connect() -> sqlite3.Connection:
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(DB_PATH), timeout=10)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS daily (
+            day TEXT NOT NULL,
+            username TEXT NOT NULL,
+            messages INTEGER NOT NULL DEFAULT 0,
+            recipients INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (day, username)
+        )
+        """
+    )
+    conn.commit()
+    return conn
+
+
+def read_request() -> dict[str, str]:
+    attrs: dict[str, str] = {}
+    while True:
+        line = sys.stdin.readline()
+        if line == "":
+            return {}
+        line = line.rstrip("\r\n")
+        if line == "":
+            return attrs
+        if "=" in line:
+            k, v = line.split("=", 1)
+            attrs[k] = v
+
+
+def reply(action: str) -> None:
+    sys.stdout.write(f"action={action}\n\n")
+    sys.stdout.flush()
+
+
+def bump(conn: sqlite3.Connection, user: str, messages: int, recipients: int) -> tuple[int, int]:
+    day = date.today().isoformat()
+    conn.execute(
+        """
+        INSERT INTO daily (day, username, messages, recipients)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(day, username) DO UPDATE SET
+            messages = messages + excluded.messages,
+            recipients = recipients + excluded.recipients
+        """,
+        (day, user, messages, recipients),
+    )
+    row = conn.execute(
+        "SELECT messages, recipients FROM daily WHERE day = ? AND username = ?",
+        (day, user),
+    ).fetchone()
+    conn.commit()
+    return int(row[0]), int(row[1])
+
+
+def current(conn: sqlite3.Connection, user: str) -> tuple[int, int]:
+    day = date.today().isoformat()
+    row = conn.execute(
+        "SELECT messages, recipients FROM daily WHERE day = ? AND username = ?",
+        (day, user),
+    ).fetchone()
+    if not row:
+        return 0, 0
+    return int(row[0]), int(row[1])
+
+
+def main() -> int:
+    try:
+        msg_quota, rcpt_quota = load_quotas()
+        conn = db_connect()
+    except Exception:
+        traceback.print_exc(file=sys.stderr)
+        # Stay alive and never break mail if setup failed hard on first line
+        while True:
+            req = read_request()
+            if not req:
+                break
+            reply("dunno")
+        return 0
+
+    while True:
+        try:
+            req = read_request()
+            if not req:
+                break
+
+            user = (req.get("sasl_username") or "").strip().lower()
+            protocol = (req.get("protocol_state") or "").upper()
+
+            if not user:
+                reply("dunno")
+                continue
+
+            msgs, rcpts = current(conn, user)
+
+            if protocol == "RCPT":
+                if msgs >= msg_quota:
+                    reply(f"reject Daily message quota exceeded ({msg_quota}/day)")
+                    continue
+                if rcpts + 1 > rcpt_quota:
+                    reply(f"reject Daily recipient quota exceeded ({rcpt_quota}/day)")
+                    continue
+                reply("dunno")
+                continue
+
+            if protocol == "END-OF-MESSAGE":
+                nrcpt = int(req.get("recipient_count") or "1")
+                if msgs + 1 > msg_quota or rcpts + nrcpt > rcpt_quota:
+                    reply(
+                        f"reject Daily sending quota exceeded "
+                        f"(messages {msg_quota}/day, recipients {rcpt_quota}/day)"
+                    )
+                    continue
+                bump(conn, user, 1, nrcpt)
+                reply("dunno")
+                continue
+
+            if msgs >= msg_quota or rcpts >= rcpt_quota:
+                reply(
+                    f"reject Daily sending quota exceeded "
+                    f"(messages {msg_quota}/day, recipients {rcpt_quota}/day)"
+                )
+                continue
+
+            reply("dunno")
+        except Exception:
+            traceback.print_exc(file=sys.stderr)
+            try:
+                reply("dunno")
+            except Exception:
+                break
+
+    try:
+        conn.close()
+    except Exception:
+        pass
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

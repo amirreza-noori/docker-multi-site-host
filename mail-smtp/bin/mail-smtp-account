@@ -1,0 +1,232 @@
+#!/usr/bin/env bash
+# Manage submission accounts and per-domain DKIM keys for mail-smtp.
+set -euo pipefail
+
+PASSWD_FILE="${MAIL_SMTP_PASSWD:-/etc/mail-smtp/passwd}"
+SENDER_MAP="${MAIL_SMTP_SENDER_MAP:-/etc/mail-smtp/sender_login_maps}"
+DKIM_DIR="${MAIL_SMTP_DKIM_DIR:-/etc/mail-smtp/dkim}"
+KEY_TABLE="${MAIL_SMTP_KEY_TABLE:-/etc/opendkim/KeyTable}"
+SIGNING_TABLE="${MAIL_SMTP_SIGNING_TABLE:-/etc/opendkim/SigningTable}"
+ACCOUNTS_LIST="${MAIL_SMTP_ACCOUNTS:-/etc/mail-smtp/accounts.list}"
+
+require_root() {
+  if [[ "${EUID}" -ne 0 ]]; then
+    echo "mail-smtp-account: run as root" >&2
+    exit 1
+  fi
+}
+
+normalize_user() {
+  echo "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+domain_of() {
+  local u="$1"
+  echo "${u#*@}"
+}
+
+rebuild_sender_map() {
+  : > "${SENDER_MAP}"
+  if [[ -f "${ACCOUNTS_LIST}" ]]; then
+    while IFS= read -r user || [[ -n "${user}" ]]; do
+      [[ -z "${user}" || "${user}" =~ ^# ]] && continue
+      user="$(normalize_user "${user}")"
+      echo "${user} ${user}" >> "${SENDER_MAP}"
+    done < "${ACCOUNTS_LIST}"
+  fi
+  postmap "hash:${SENDER_MAP}"
+  systemctl reload postfix 2>/dev/null || true
+}
+
+set_passwd_line() {
+  local user="$1"
+  local password="$2"
+  local hash line
+  hash="$(doveadm pw -s SHA512-CRYPT -p "${password}")"
+  line="${user}:${hash}"
+  touch "${PASSWD_FILE}"
+  chmod 640 "${PASSWD_FILE}"
+  chown root:dovecot "${PASSWD_FILE}" 2>/dev/null || chown root:root "${PASSWD_FILE}"
+  if grep -q "^${user}:" "${PASSWD_FILE}"; then
+    grep -v "^${user}:" "${PASSWD_FILE}" > "${PASSWD_FILE}.tmp"
+    mv "${PASSWD_FILE}.tmp" "${PASSWD_FILE}"
+  fi
+  echo "${line}" >> "${PASSWD_FILE}"
+  chmod 640 "${PASSWD_FILE}"
+  chown root:dovecot "${PASSWD_FILE}" 2>/dev/null || true
+  systemctl reload dovecot 2>/dev/null || systemctl restart dovecot
+}
+
+ensure_dkim_domain() {
+  local domain="$1"
+  local selector="${2:-mail}"
+  local keydir="${DKIM_DIR}/${domain}"
+  mkdir -p "${keydir}"
+  if [[ ! -f "${keydir}/${selector}.private" ]]; then
+    opendkim-genkey -b 2048 -d "${domain}" -D "${keydir}" -s "${selector}" -v
+  fi
+  # OpenDKIM refuses keys if the group has extra members (e.g. postfix)
+  chown -R opendkim:opendkim "${keydir}"
+  chmod 700 "${keydir}"
+  chmod 600 "${keydir}/${selector}.private"
+
+  local key_line="${selector}._domainkey.${domain} ${domain}:${selector}:${keydir}/${selector}.private"
+  local sign_line="*@${domain} ${selector}._domainkey.${domain}"
+
+  mkdir -p "$(dirname "${KEY_TABLE}")" "$(dirname "${SIGNING_TABLE}")"
+  touch "${KEY_TABLE}" "${SIGNING_TABLE}"
+  chown opendkim:opendkim "${KEY_TABLE}" "${SIGNING_TABLE}" 2>/dev/null || true
+  grep -qxF "${key_line}" "${KEY_TABLE}" 2>/dev/null || echo "${key_line}" >> "${KEY_TABLE}"
+  grep -qxF "${sign_line}" "${SIGNING_TABLE}" 2>/dev/null || echo "${sign_line}" >> "${SIGNING_TABLE}"
+
+  systemctl reload opendkim 2>/dev/null || systemctl restart opendkim
+
+  echo "DKIM public record for ${domain} (TXT ${selector}._domainkey.${domain}):"
+  echo "----"
+  cat "${keydir}/${selector}.txt"
+  echo "----"
+}
+
+cmd_add() {
+  local user password domain
+  user="$(normalize_user "${1:-}")"
+  password="${2:-}"
+  if [[ -z "${user}" || "${user}" != *@* ]]; then
+    echo "usage: mail-smtp-account add user@domain.com [password]" >&2
+    exit 1
+  fi
+  if [[ -z "${password}" ]]; then
+    read -r -s -p "Password for ${user}: " password
+    echo
+  fi
+  if [[ ${#password} -lt 12 ]]; then
+    echo "mail-smtp-account: password must be at least 12 characters" >&2
+    exit 1
+  fi
+
+  domain="$(domain_of "${user}")"
+  touch "${ACCOUNTS_LIST}"
+  chmod 640 "${ACCOUNTS_LIST}"
+  if ! grep -qixF "${user}" "${ACCOUNTS_LIST}"; then
+    echo "${user}" >> "${ACCOUNTS_LIST}"
+  fi
+
+  set_passwd_line "${user}" "${password}"
+  rebuild_sender_map
+  ensure_dkim_domain "${domain}"
+  echo "mail-smtp-account: added ${user}"
+  echo "mail-smtp-account: From: must be exactly ${user} (mismatch is rejected)"
+}
+
+cmd_passwd() {
+  local user password
+  user="$(normalize_user "${1:-}")"
+  password="${2:-}"
+  if [[ -z "${user}" || "${user}" != *@* ]]; then
+    echo "usage: mail-smtp-account passwd user@domain.com [password]" >&2
+    exit 1
+  fi
+  if [[ -z "${password}" ]]; then
+    read -r -s -p "New password for ${user}: " password
+    echo
+  fi
+  if [[ ${#password} -lt 12 ]]; then
+    echo "mail-smtp-account: password must be at least 12 characters" >&2
+    exit 1
+  fi
+  if [[ -f "${ACCOUNTS_LIST}" ]] && ! grep -qixF "${user}" "${ACCOUNTS_LIST}"; then
+    echo "mail-smtp-account: unknown account ${user}" >&2
+    exit 1
+  fi
+  set_passwd_line "${user}" "${password}"
+  echo "mail-smtp-account: password updated for ${user}"
+}
+
+cmd_remove() {
+  local user
+  user="$(normalize_user "${1:-}")"
+  if [[ -z "${user}" ]]; then
+    echo "usage: mail-smtp-account remove user@domain.com" >&2
+    exit 1
+  fi
+  if [[ -f "${PASSWD_FILE}" ]]; then
+    grep -v "^${user}:" "${PASSWD_FILE}" > "${PASSWD_FILE}.tmp" || true
+    mv "${PASSWD_FILE}.tmp" "${PASSWD_FILE}"
+    chmod 640 "${PASSWD_FILE}"
+    chown root:dovecot "${PASSWD_FILE}" 2>/dev/null || true
+  fi
+  if [[ -f "${ACCOUNTS_LIST}" ]]; then
+    grep -vixF "${user}" "${ACCOUNTS_LIST}" > "${ACCOUNTS_LIST}.tmp" || true
+    mv "${ACCOUNTS_LIST}.tmp" "${ACCOUNTS_LIST}"
+  fi
+  rebuild_sender_map
+  systemctl reload dovecot 2>/dev/null || true
+  echo "mail-smtp-account: removed ${user}"
+}
+
+cmd_list() {
+  if [[ -f "${ACCOUNTS_LIST}" ]]; then
+    cat "${ACCOUNTS_LIST}"
+  fi
+}
+
+cmd_dkim() {
+  local domain="${1:-}"
+  if [[ -z "${domain}" ]]; then
+    echo "usage: mail-smtp-account dkim domain.com [selector]" >&2
+    exit 1
+  fi
+  ensure_dkim_domain "${domain}" "${2:-mail}"
+}
+
+cmd_dkim_remove() {
+  local domain selector keydir
+  domain="$(echo "${1:-}" | tr '[:upper:]' '[:lower:]')"
+  selector="${2:-mail}"
+  if [[ -z "${domain}" || "${domain}" == *@* ]]; then
+    echo "usage: mail-smtp-account dkim-remove domain.com [selector]" >&2
+    exit 1
+  fi
+  keydir="${DKIM_DIR}/${domain}"
+  if [[ -f "${KEY_TABLE}" ]]; then
+    grep -v " ${domain}:${selector}:" "${KEY_TABLE}" > "${KEY_TABLE}.tmp" || true
+    mv "${KEY_TABLE}.tmp" "${KEY_TABLE}"
+  fi
+  if [[ -f "${SIGNING_TABLE}" ]]; then
+    grep -vF "*@${domain} " "${SIGNING_TABLE}" > "${SIGNING_TABLE}.tmp" || true
+    mv "${SIGNING_TABLE}.tmp" "${SIGNING_TABLE}"
+  fi
+  chown opendkim:opendkim "${KEY_TABLE}" "${SIGNING_TABLE}" 2>/dev/null || true
+  rm -rf "${keydir}"
+  systemctl reload opendkim 2>/dev/null || systemctl restart opendkim
+  echo "mail-smtp-account: removed DKIM for ${domain}"
+}
+
+usage() {
+  cat <<EOF
+Usage: mail-smtp-account <command>
+
+  add user@domain.com [password]   Create submission account + DKIM for domain
+  passwd user@domain.com [password]
+  remove user@domain.com
+  list
+  dkim domain.com [selector]       (Re)generate DKIM key and print DNS TXT
+  dkim-remove domain.com [selector]
+
+Accounts may only send with From: equal to the authenticated address.
+Intended for low-volume transactional mail — not bulk / SEO / marketing spam.
+EOF
+}
+
+require_root
+cmd="${1:-}"
+shift || true
+case "${cmd}" in
+  add) cmd_add "$@" ;;
+  passwd) cmd_passwd "$@" ;;
+  remove) cmd_remove "$@" ;;
+  list) cmd_list ;;
+  dkim) cmd_dkim "$@" ;;
+  dkim-remove) cmd_dkim_remove "$@" ;;
+  *) usage; exit 1 ;;
+esac
