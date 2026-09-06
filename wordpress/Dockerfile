@@ -17,7 +17,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update; \
     apt-get install -y --no-install-recommends unzip; \
     rm -rf /var/lib/apt/lists/*; \
-    pecl install timezonedb
+    pecl install timezonedb; \
+    pecl install igbinary
 
 ARG WORDPRESS_VERSION=6.8
 RUN set -eux; \
