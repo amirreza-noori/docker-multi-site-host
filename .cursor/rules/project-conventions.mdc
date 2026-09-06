@@ -28,11 +28,16 @@ backend example_backend
     server example-com example-com:80
 ```
 
+## WordPress site layout
+
+- Compose mounts `./wp-content` → `/app/wp-content` (themes, plugins, uploads, languages, W3TC config/drop-ins, cache).
+- Backup `sites.conf` paths: `wp-content` with ignore `wp-content/cache/* wp-content/upgrade/*`.
+
 ## Adding a WordPress site
 
 1. `cp -r "$SITES_DIR/_template_wordpress" "$SITES_DIR/<folder>"`
 2. Edit compose (for PHP 7.4: uncomment `PHP_VERSION` and alternate `image` line), wp-config, haproxy.cfg, database.sql
-3. Add to `backup/sites.conf` and `docker-compose.sites.yml`
+3. Add to `backup/sites.conf` (`wp-content|wp-content/cache/* wp-content/upgrade/*`) and `docker-compose.sites.yml`
 4. `docker compose up -d` and `docker compose restart haproxy`
 
 ## Adding a static site

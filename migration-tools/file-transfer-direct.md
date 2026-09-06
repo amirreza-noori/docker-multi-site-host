@@ -35,8 +35,12 @@ tar -xzf /tmp/example-uploads.tar.gz -C /var/www/example.com/wp-content/
 
 ## Full site folder (this stack)
 
+WordPress sites keep all mutable content under `wp-content/` (bind-mounted). Prefer syncing that tree; exclude regenerable cache:
+
 ```bash
 rsync -avz --progress \
+  --exclude 'wp-content/cache/' \
+  --exclude 'wp-content/upgrade/' \
   user@source:/path/to/sites/example-com/ \
   /path/to/sites/example-com/
 ```

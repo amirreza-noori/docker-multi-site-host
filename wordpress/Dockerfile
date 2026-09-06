@@ -30,14 +30,16 @@ RUN set -eux; \
 ARG WORDPRESS_LOCALE=en_US
 ARG WORDPRESS_VERSION=6.8
 RUN set -eux; \
+    mkdir -p /opt/wordpress-languages; \
     if [ "${WORDPRESS_LOCALE}" != "en_US" ]; then \
       mkdir -p /app/wp-content/languages; \
       curl -fsSL "https://downloads.wordpress.org/translation/core/${WORDPRESS_VERSION}/${WORDPRESS_LOCALE}.zip" -o /tmp/locale.zip; \
       unzip -oq /tmp/locale.zip -d /app/wp-content/languages; \
       rm /tmp/locale.zip; \
+      cp -a /app/wp-content/languages/. /opt/wordpress-languages/; \
     fi
 
-RUN chown -R application:application /app
+RUN chown -R application:application /app /opt/wordpress-languages
 
 COPY docker/wordpress-entrypoint.sh /usr/local/bin/wordpress-entrypoint.sh
 RUN chmod +x /usr/local/bin/wordpress-entrypoint.sh \

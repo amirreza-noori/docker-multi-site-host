@@ -3,6 +3,7 @@ set -euo pipefail
 
 WP_PATH="/app"
 WP_CONFIG="${WP_PATH}/wp-config.php"
+WP_CONTENT="${WP_PATH}/wp-content"
 CONTAINER_NAME="${CONTAINER_NAME:-wordpress}"
 WP_DB_HOST_DEFAULT="${WORDPRESS_DB_HOST:-mariadb:3306}"
 
@@ -36,11 +37,27 @@ fix_mount_file() {
   fi
 }
 
-OC="${WP_PATH}/wp-content/object-cache.php"
+# Host bind-mount for full wp-content (themes, plugins, uploads, W3TC, languages)
+mkdir -p \
+  "${WP_CONTENT}/themes" \
+  "${WP_CONTENT}/plugins" \
+  "${WP_CONTENT}/uploads" \
+  "${WP_CONTENT}/languages"
+
+# Locale pack from image when the mounted languages dir is still empty
+if [ -d /opt/wordpress-languages ] \
+  && [ -n "$(ls -A /opt/wordpress-languages 2>/dev/null || true)" ] \
+  && [ -z "$(ls -A "${WP_CONTENT}/languages" 2>/dev/null || true)" ]; then
+  cp -a /opt/wordpress-languages/. "${WP_CONTENT}/languages/"
+fi
+
+OC="${WP_CONTENT}/object-cache.php"
 if [ -d "$OC" ]; then
-  echo "ERROR: $OC is a directory on the host — remove it and add object-cache.php as a file" >&2
+  echo "ERROR: $OC is a directory — remove it so a cache plugin can install object-cache.php as a file" >&2
   exit 1
 fi
+
+chown -R application:application "${WP_CONTENT}" || true
 fix_mount_file "$OC"
 fix_mount_file "${WP_PATH}/.htaccess"
 fix_mount_file "${WP_CONFIG}"

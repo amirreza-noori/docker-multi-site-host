@@ -22,9 +22,10 @@ Each folder under `SITES_DIR` has one `haproxy.cfg` (frontend + backend, split b
 3. Set `build.context` to the repo `wordpress/` directory (absolute path when `SITES_DIR` is outside the repo)
 4. For PHP 7.4: uncomment `build.args.PHP_VERSION` and the alternate `image` line in `docker-compose.yml`
 5. Edit `wp-config.php`, `haproxy.cfg`, `database.sql`
-6. Add to `backup/sites.conf` and `docker-compose.sites.yml`
-7. `docker compose up -d`
-8. `docker compose restart haproxy`
+6. Put themes/plugins/uploads under `wp-content/` (the whole folder is bind-mounted so W3TC config and drop-ins survive rebuilds)
+7. Add to `backup/sites.conf` (e.g. `my-site|db_name|wp-content|wp-content/cache/* wp-content/upgrade/*|10|1`) and `docker-compose.sites.yml`
+8. `docker compose up -d`
+9. `docker compose restart haproxy`
 
 ## Add a static site
 

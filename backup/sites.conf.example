@@ -6,16 +6,19 @@
 #
 # folder              — site directory name under SITES_DIR
 # database            — MariaDB database name (- if db backup disabled)
-# paths               — comma-separated folders to zip (- if files backup disabled)
+# paths               — comma-separated folders/files to zip (- if files backup disabled)
 # ignore              — space-separated zip exclude patterns (optional)
 # db_interval_min     — database backup every N minutes; 0/off = disabled
 # files_interval_days — files backup every N days (checked at BACKUP_FULL_HOUR); 0/off = disabled
 #
 # All six fields are required. Omitted intervals default to disabled (0).
 #
+# WordPress: back up wp-content (includes themes, plugins, uploads, W3TC config/drop-ins).
+# Exclude cache/upgrade — regenerable and often large.
+#
 # Examples:
-# example-com|example_com_wp|themes,plugins,uploads,object-cache.php||10|1
-# archive-site|archive_wp|themes,plugins,uploads||1440|30
+# example-com|example_com_wp|wp-content|wp-content/cache/* wp-content/upgrade/*|10|1
+# archive-site|archive_wp|wp-content|wp-content/cache/* wp-content/upgrade/*|1440|30
 # db-only|example_com_wp|-|-|10|0
-# files-only|example_com_wp|themes,plugins,uploads||0|7
+# files-only|example_com_wp|wp-content|wp-content/cache/* wp-content/upgrade/*|0|7
 # static-site|-|public||0|7
