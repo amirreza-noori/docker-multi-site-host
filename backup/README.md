@@ -12,6 +12,17 @@ BACKUP_DIR/
 ```
 
 When FTP is enabled, the same per-site tree is mirrored on the remote server.
+Every runner cycle lists each site folder on FTP and deletes archives that fail the
+retention rules (so remote orphans are cleaned even after local prune).
+
+## Retention (from `sites.conf` intervals)
+
+| Kind | Create interval | Keep |
+|------|-----------------|------|
+| DB | `db_interval_min` | all for ~6×interval (1–6h); then every ~12×interval (≥2h) until 24h; every 2 days until 30d; monthly until 6mo; Jan/Jul after |
+| Files | `files_interval_days` | all for that many days; then every N days until 30d; monthly until 6mo |
+
+Example: `|10|7` → DB every 10 minutes with dense recent keep; files every 7 days.
 
 ## Docker host configuration
 

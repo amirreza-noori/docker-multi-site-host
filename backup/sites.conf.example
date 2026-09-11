@@ -11,6 +11,13 @@
 # db_interval_min     — database backup every N minutes; 0/off = disabled
 # files_interval_days — files backup every N days (checked at BACKUP_FULL_HOUR); 0/off = disabled
 #
+# Intervals also drive retention density:
+#   DB: keep all for ~6×interval (1–6h) → every ~12×interval (min 2h) until 24h
+#       → every 2 days until 30d → monthly until 6mo → Jan/Jul after that
+#   Files: keep all for files_interval days → every files_interval days until 30d
+#       → monthly until 6mo
+# Local and FTP mirrors are pruned every runner cycle (not only when a new backup is created).
+#
 # All six fields are required. Omitted intervals default to disabled (0).
 #
 # WordPress: back up wp-content (includes themes, plugins, uploads, W3TC config/drop-ins).
