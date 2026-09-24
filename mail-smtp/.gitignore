@@ -1,5 +1,0 @@
-# Local env — never commit tokens
-mail-smtp.env
-cloudflare.ini
-*.pem
-*.key

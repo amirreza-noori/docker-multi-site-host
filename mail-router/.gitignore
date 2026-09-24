@@ -1,0 +1,9 @@
+mail-router.env
+data/
+*.db
+*.pid
+*.log
+*.pem
+*.key
+__pycache__/
+*.pyc
