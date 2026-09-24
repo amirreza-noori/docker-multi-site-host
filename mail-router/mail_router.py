@@ -34,7 +34,7 @@ from http import HTTPStatus
 from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.request import urlopen
 
 # ---------------------------------------------------------------------------
@@ -91,6 +91,9 @@ class Config:
     max_hops: int
     srs_secret: str
     public_ip: str  # optional override; empty = auto-detect
+    # STARTTLS on inbound MX port 25 (set no only if a provider breaks on TLS)
+    inbound_starttls: bool
+    panel_login_lock_minutes: int
 
     @property
     def db_path(self) -> Path:
@@ -171,6 +174,11 @@ def build_config() -> Config:
         max_hops=int(g("MAX_HOPS", "20") or "20"),
         srs_secret=srs_secret,
         public_ip=g("PUBLIC_IP", "") or g("SERVER_IP", ""),
+        inbound_starttls=g("INBOUND_STARTTLS", "yes").lower()
+        in ("1", "true", "yes", "on"),
+        panel_login_lock_minutes=max(
+            1, int(g("PANEL_LOGIN_LOCK_MINUTES", "10") or "10")
+        ),
     )
 
 
@@ -327,7 +335,8 @@ class DB:
                 CREATE TABLE IF NOT EXISTS sessions (
                     token TEXT PRIMARY KEY,
                     created_at TEXT NOT NULL,
-                    expires_at TEXT NOT NULL
+                    expires_at TEXT NOT NULL,
+                    csrf_token TEXT NOT NULL DEFAULT ''
                 );
                 CREATE TABLE IF NOT EXISTS senders (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -403,6 +412,15 @@ class DB:
                 CREATE INDEX IF NOT EXISTS idx_queue_next ON queue(next_attempt_at);
                 """
             )
+            # Session CSRF column (existing installs)
+            cols = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(sessions)").fetchall()
+            }
+            if "csrf_token" not in cols:
+                conn.execute(
+                    "ALTER TABLE sessions ADD COLUMN csrf_token TEXT NOT NULL DEFAULT ''"
+                )
             row = conn.execute("SELECT password_hash FROM admin WHERE id = 1").fetchone()
             if not row:
                 if len(cfg.admin_password) < 12:
@@ -1219,6 +1237,9 @@ class SMTPSession:
 
     async def run(self) -> None:
         cfg = self.app.cfg
+        peer = self.peer or ("?", 0)
+        role = "submission" if self.submission else "inbound"
+        log.info("SMTP %s connect from %s:%s", role, peer[0], peer[1])
         await self.send(220, f"{cfg.mail_hostname} {APP_NAME} ESMTP")
         try:
             while True:
@@ -1241,28 +1262,35 @@ class SMTPSession:
                         "8BITMIME",
                         f"SIZE {cfg.max_message_size_bytes}",
                     ]
-                    if cfg.has_tls and not self.tls:
+                    # STARTTLS: always offer on submission when certs exist.
+                    # On inbound (:25) only if INBOUND_STARTTLS=yes — advertising
+                    # broken TLS causes Yahoo (strict) to fail after long retries
+                    # while Gmail may still deliver in cleartext.
+                    offer_tls = cfg.has_tls and not self.tls and (
+                        self.submission or cfg.inbound_starttls
+                    )
+                    if offer_tls:
                         caps.append("STARTTLS")
                     if self.submission:
                         caps.append("AUTH PLAIN LOGIN")
                     await self.send_multi(250, caps)
                 elif cmd_u == "STARTTLS":
+                    allow = cfg.has_tls and (
+                        self.submission or cfg.inbound_starttls
+                    )
                     if self.tls:
                         await self.send(503, "TLS already active")
-                    elif not cfg.has_tls:
-                        await self.send(
-                            454,
-                            "TLS not available — set TLS_CERT_FILE/TLS_KEY_FILE "
-                            "(or place Let's Encrypt certs for MAIL_HOSTNAME)",
-                        )
+                    elif not allow:
+                        await self.send(454, "TLS not available on this port")
                     else:
                         try:
                             await self.send(220, "Ready to start TLS")
                             await self._wrap_tls()
                             self._reset_tx()
                             self.authed_user = None
+                            log.info("SMTP %s STARTTLS OK peer=%s", role, peer[0])
                         except Exception:
-                            log.exception("STARTTLS failed")
+                            log.exception("STARTTLS failed peer=%s", peer[0])
                             await self.send(454, "TLS not available right now")
                             break
                 elif cmd_u == "AUTH" and self.submission:
@@ -1283,6 +1311,8 @@ class SMTPSession:
                     break
                 else:
                     await self.send(502, "Command not implemented")
+        except Exception:
+            log.exception("SMTP %s session error peer=%s", role, peer[0])
         finally:
             try:
                 self.writer.close()
@@ -1292,18 +1322,19 @@ class SMTPSession:
 
     async def _wrap_tls(self) -> None:
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         ctx.load_cert_chain(self.app.cfg.tls_cert_file, self.app.cfg.tls_key_file)
-        try:
-            transport = self.writer.transport
-            protocol = transport.get_protocol()
-            new_transport = await asyncio.get_running_loop().start_tls(
-                transport, protocol, ctx, server_side=True
-            )
-            self.writer._transport = new_transport  # noqa: SLF001
-            self.tls = True
-        except Exception as exc:
-            log.warning("STARTTLS failed: %s", exc)
-            raise
+        transport = self.writer.transport
+        protocol = transport.get_protocol()
+        new_transport = await asyncio.get_running_loop().start_tls(
+            transport, protocol, ctx, server_side=True
+        )
+        # Both sides of the stream must see the SSL transport (Python 3.10).
+        self.writer._transport = new_transport  # noqa: SLF001
+        reader_transport = getattr(self.reader, "_transport", None)
+        if reader_transport is not None:
+            self.reader._transport = new_transport  # noqa: SLF001
+        self.tls = True
 
     async def _auth(self, arg: str) -> None:
         mech, _, rest = arg.partition(" ")
@@ -1620,14 +1651,36 @@ def process_queue_once(app: "App") -> None:
 # Admin HTTP panel
 # ---------------------------------------------------------------------------
 
+# Inline SVG favicon (mail envelope) — no external assets
+FAVICON_SVG = (
+    "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'>"
+    "<rect width='64' height='64' rx='14' fill='#121a24'/>"
+    "<path d='M10 20h44v28H10z' fill='none' stroke='#3d8bfd' stroke-width='3'/>"
+    "<path d='M10 20l22 16L54 20' fill='none' stroke='#3d8bfd' stroke-width='3'/>"
+    "</svg>"
+)
+FAVICON_HREF = "data:image/svg+xml," + quote(FAVICON_SVG)
+
+BRAND_ICON_SVG = (
+    "<svg xmlns='http://www.w3.org/2000/svg' width='22' height='22' viewBox='0 0 64 64' "
+    "aria-hidden='true' style='display:block;margin-right:0.4rem;flex-shrink:0'>"
+    "<rect width='64' height='64' rx='14' fill='#1a2332'/>"
+    "<path d='M10 20h44v28H10z' fill='none' stroke='#3d8bfd' stroke-width='4'/>"
+    "<path d='M10 20l22 16L54 20' fill='none' stroke='#3d8bfd' stroke-width='4'/>"
+    "</svg>"
+)
+
 CSS = """
 :root { --bg:#0f1419; --card:#1a2332; --text:#e7ecf3; --muted:#9aa7b8; --acc:#3d8bfd; --danger:#e35d6a; --ok:#3ecf8e; --line:#2a3548; }
 * { box-sizing: border-box; }
 body { margin:0; font:14px/1.45 system-ui,Segoe UI,sans-serif; background:var(--bg); color:var(--text); }
 a { color:var(--acc); text-decoration:none; }
 header { display:flex; gap:1rem; align-items:center; padding:0.85rem 1.25rem; border-bottom:1px solid var(--line); background:#121a24; position:sticky; top:0; }
-header .brand { font-weight:700; letter-spacing:0.02em; }
-header nav { display:flex; gap:0.85rem; flex-wrap:wrap; }
+header .brand { font-weight:700; letter-spacing:0.02em; display:flex; align-items:center; line-height:1; }
+header nav { display:flex; gap:0.85rem; flex-wrap:wrap; align-items:center; }
+header nav a { display:inline-flex; align-items:center; line-height:1; padding:0.35rem 0; }
+header nav form { display:inline-flex; align-items:center; margin:0; }
+header nav button { line-height:1; padding:0.4rem 0.75rem; }
 main { max-width:980px; margin:1.25rem auto; padding:0 1rem 3rem; }
 .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:1rem 1.1rem; margin-bottom:1rem; }
 h1,h2 { margin:0 0 0.75rem; font-size:1.15rem; }
@@ -1639,6 +1692,7 @@ textarea { min-height:70px; width:100%; }
 button, .btn { background:var(--acc); color:#fff; border:0; border-radius:6px; padding:0.45rem 0.8rem; cursor:pointer; font:inherit; display:inline-block; }
 button.secondary, .btn.secondary { background:#2a3548; }
 button.danger { background:var(--danger); }
+button:disabled { opacity:0.55; cursor:not-allowed; }
 table { width:100%; border-collapse:collapse; font-size:13px; }
 th, td { text-align:left; padding:0.45rem 0.35rem; border-bottom:1px solid var(--line); vertical-align:top; }
 .flash { padding:0.6rem 0.8rem; border-radius:6px; margin-bottom:1rem; }
@@ -1658,10 +1712,23 @@ class Panel:
     def __init__(self, app: "App"):
         self.app = app
 
-    def layout(self, title: str, body: str, user_ok: bool = True, flash: str = "", flash_err: str = "") -> bytes:
+    def layout(
+        self,
+        title: str,
+        body: str,
+        user_ok: bool = True,
+        flash: str = "",
+        flash_err: str = "",
+        csrf: str = "",
+    ) -> bytes:
         nav = ""
         if user_ok:
-            nav = """
+            logout = (
+                f'<form method="post" action="/logout" style="display:inline">'
+                f'<input type="hidden" name="csrf" value="{h(csrf)}">'
+                f'<button type="submit" class="secondary">Logout</button></form>'
+            )
+            nav = f"""
             <a href="/">Dashboard</a>
             <a href="/senders">Senders</a>
             <a href="/listen">Listen</a>
@@ -1669,7 +1736,7 @@ class Panel:
             <a href="/domains">Domains</a>
             <a href="/events">Events</a>
             <a href="/settings">Settings</a>
-            <a href="/logout">Logout</a>
+            {logout}
             """
         flash_html = ""
         if flash:
@@ -1678,58 +1745,149 @@ class Panel:
             flash_html += f'<div class="flash err">{h(flash_err)}</div>'
         page = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<link rel="icon" href="{FAVICON_HREF}">
 <title>{h(title)} · {APP_NAME}</title><style>{CSS}</style></head>
 <body>
-<header><div class="brand">{APP_NAME}</div><nav>{nav}</nav></header>
+<header><div class="brand">{BRAND_ICON_SVG}{APP_NAME}</div><nav>{nav}</nav></header>
 <main>{flash_html}{body}</main>
 </body></html>"""
         return page.encode("utf-8")
 
-    def session_token(self, headers: dict[str, str]) -> Optional[str]:
+    def _cookie_value(self, headers: dict[str, str], name: str) -> Optional[str]:
         cookie = SimpleCookie()
         if "cookie" in headers:
             cookie.load(headers["cookie"])
-        morsel = cookie.get("mr_session")
+        morsel = cookie.get(name)
         return morsel.value if morsel else None
 
-    def valid_session(self, token: Optional[str]) -> bool:
-        if not token:
-            return False
+    def session_token(self, headers: dict[str, str]) -> Optional[str]:
+        return self._cookie_value(headers, "mr_session")
+
+    def meta_get(self, key: str) -> str:
         conn = self.app.db.connect()
         try:
             row = conn.execute(
-                "SELECT expires_at FROM sessions WHERE token = ?", (token,)
+                "SELECT value FROM meta WHERE key = ?", (key,)
+            ).fetchone()
+            return row["value"] if row else ""
+        finally:
+            conn.close()
+
+    def meta_set(self, key: str, value: str) -> None:
+        conn = self.app.db.connect()
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+                (key, value),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def meta_delete(self, key: str) -> None:
+        conn = self.app.db.connect()
+        try:
+            conn.execute("DELETE FROM meta WHERE key = ?", (key,))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def login_lock_remaining(self) -> int:
+        """Seconds left on global login lock (0 = unlocked)."""
+        raw = self.meta_get("login_locked_until")
+        if not raw:
+            return 0
+        try:
+            until = datetime.strptime(raw, "%Y-%m-%dT%H:%M:%SZ").replace(
+                tzinfo=timezone.utc
+            )
+        except ValueError:
+            self.meta_delete("login_locked_until")
+            return 0
+        left = int((until - utc_now()).total_seconds())
+        if left <= 0:
+            self.meta_delete("login_locked_until")
+            return 0
+        return left
+
+    def engage_login_lock(self) -> None:
+        mins = self.app.cfg.panel_login_lock_minutes
+        until = utc_now() + timedelta(minutes=mins)
+        self.meta_set("login_locked_until", until.strftime("%Y-%m-%dT%H:%M:%SZ"))
+        # Invalidate every panel session — global lockout after bad password
+        conn = self.app.db.connect()
+        try:
+            conn.execute("DELETE FROM sessions")
+            conn.commit()
+        finally:
+            conn.close()
+        self.app.db.event(
+            "login_lock",
+            f"global lock {mins}m after failed password",
+        )
+
+    def clear_login_lock(self) -> None:
+        self.meta_delete("login_locked_until")
+
+    def valid_session(self, token: Optional[str]) -> bool:
+        return self.session_csrf(token) is not None
+
+    def session_csrf(self, token: Optional[str]) -> Optional[str]:
+        if not token:
+            return None
+        conn = self.app.db.connect()
+        try:
+            row = conn.execute(
+                "SELECT expires_at, csrf_token FROM sessions WHERE token = ?",
+                (token,),
             ).fetchone()
             if not row:
-                return False
+                return None
             exp = datetime.strptime(row["expires_at"], "%Y-%m-%dT%H:%M:%SZ").replace(
                 tzinfo=timezone.utc
             )
             if exp < utc_now():
                 conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
                 conn.commit()
-                return False
-            return True
+                return None
+            csrf = row["csrf_token"] or ""
+            if not csrf:
+                csrf = secrets.token_urlsafe(24)
+                conn.execute(
+                    "UPDATE sessions SET csrf_token = ? WHERE token = ?",
+                    (csrf, token),
+                )
+                conn.commit()
+            return csrf
         finally:
             conn.close()
 
-    def create_session(self) -> str:
+    def create_session(self) -> tuple[str, str]:
         token = secrets.token_urlsafe(32)
-        exp = utc_now() + timedelta(hours=12)
+        csrf = secrets.token_urlsafe(24)
+        exp = utc_now() + timedelta(hours=8)
         conn = self.app.db.connect()
         try:
             conn.execute(
-                "INSERT INTO sessions (token, created_at, expires_at) VALUES (?, ?, ?)",
-                (token, utc_now_iso(), exp.strftime("%Y-%m-%dT%H:%M:%SZ")),
+                """
+                INSERT INTO sessions (token, created_at, expires_at, csrf_token)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    token,
+                    utc_now_iso(),
+                    exp.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    csrf,
+                ),
             )
-            # prune
             conn.execute(
                 "DELETE FROM sessions WHERE expires_at < ?", (utc_now_iso(),)
             )
             conn.commit()
         finally:
             conn.close()
-        return token
+        return token, csrf
 
     def destroy_session(self, token: Optional[str]) -> None:
         if not token:
@@ -1740,6 +1898,34 @@ class Panel:
             conn.commit()
         finally:
             conn.close()
+
+    def csrf_input(self, csrf: str) -> str:
+        return f'<input type="hidden" name="csrf" value="{h(csrf)}">'
+
+    def check_csrf(self, form: dict, expected: str) -> bool:
+        got = (form.get("csrf") or [""])[0]
+        if not expected or not got:
+            return False
+        return hmac.compare_digest(got, expected)
+
+    def same_origin(self, headers: dict[str, str]) -> bool:
+        host = (headers.get("host") or "").strip().lower()
+        if not host:
+            return False
+        origin = (headers.get("origin") or "").strip()
+        referer = (headers.get("referer") or "").strip()
+        if origin:
+            try:
+                return urlparse(origin).netloc.lower() == host
+            except Exception:
+                return False
+        if referer:
+            try:
+                return urlparse(referer).netloc.lower() == host
+            except Exception:
+                return False
+        # Non-browser clients without Origin/Referer — deny state-changing POSTs
+        return False
 
     async def handle(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
@@ -1770,6 +1956,15 @@ class Panel:
         if len(parts) < 2:
             return
         method, target = parts[0].upper(), parts[1]
+        if method not in ("GET", "POST", "HEAD"):
+            await self._respond(
+                writer,
+                b"Method Not Allowed",
+                status=405,
+                extra_headers="Allow: GET, POST, HEAD\r\n",
+            )
+            return
+
         headers: dict[str, str] = {}
         while True:
             line = await asyncio.wait_for(reader.readline(), timeout=30)
@@ -1780,9 +1975,12 @@ class Panel:
                 headers[k.strip().lower()] = v.strip()
 
         length = int(headers.get("content-length", "0") or "0")
+        if length > 200_000:
+            await self._respond(writer, b"Payload too large", status=413)
+            return
         body = b""
         if length > 0:
-            body = await reader.readexactly(min(length, 1_000_000))
+            body = await reader.readexactly(min(length, 200_000))
 
         parsed = urlparse(target)
         path = unquote(parsed.path)
@@ -1794,90 +1992,243 @@ class Panel:
             return vals[0] if vals else default
 
         token = self.session_token(headers)
-        authed = self.valid_session(token)
+        csrf = self.session_csrf(token)
+        authed = csrf is not None
 
-        # Routes
+        # --- Login ---
         if path == "/login":
+            lock_left = self.login_lock_remaining()
             if method == "POST":
+                login_csrf_cookie = self._cookie_value(headers, "mr_login_csrf") or ""
+                login_csrf_form = form_get("csrf")
+                csrf_ok = bool(
+                    login_csrf_cookie
+                    and login_csrf_form
+                    and hmac.compare_digest(login_csrf_cookie, login_csrf_form)
+                )
+                if not csrf_ok or not self.same_origin(headers):
+                    login_csrf = secrets.token_urlsafe(24)
+                    page = self.layout(
+                        "Login",
+                        self._login_form(
+                            locked_seconds=lock_left, login_csrf=login_csrf
+                        ),
+                        user_ok=False,
+                        flash_err="Security check failed — reload and try again",
+                    )
+                    await self._respond(
+                        writer,
+                        page,
+                        extra_headers=(
+                            f"Set-Cookie: mr_login_csrf={login_csrf}; HttpOnly; "
+                            f"SameSite=Strict; Path=/; Max-Age=600\r\n"
+                        ),
+                    )
+                    return
+
+                if lock_left > 0:
+                    mins = max(1, (lock_left + 59) // 60)
+                    login_csrf = secrets.token_urlsafe(24)
+                    page = self.layout(
+                        "Login",
+                        self._login_form(
+                            locked_seconds=lock_left, login_csrf=login_csrf
+                        ),
+                        user_ok=False,
+                        flash_err=(
+                            f"Login locked for {mins} minute(s) after a failed attempt "
+                            "(all IPs)."
+                        ),
+                    )
+                    await self._respond(
+                        writer,
+                        page,
+                        extra_headers=(
+                            f"Set-Cookie: mr_login_csrf={login_csrf}; HttpOnly; "
+                            f"SameSite=Strict; Path=/; Max-Age=600\r\n"
+                        ),
+                    )
+                    return
+
                 password = form_get("password")
                 conn = self.app.db.connect()
                 try:
-                    row = conn.execute("SELECT password_hash FROM admin WHERE id=1").fetchone()
+                    row = conn.execute(
+                        "SELECT password_hash FROM admin WHERE id=1"
+                    ).fetchone()
                 finally:
                     conn.close()
-                # crude rate limit via events
-                if row and verify_secret(password, row["password_hash"]):
-                    new_tok = self.create_session()
-                    self.app.db.event("login", "ok")
-                    resp_body = b""
+
+                ok = bool(row and verify_secret(password, row["password_hash"]))
+                peer = writer.get_extra_info("peername")
+                if ok:
+                    self.clear_login_lock()
+                    new_tok, _new_csrf = self.create_session()
+                    self.app.db.event("login", f"ok peer={peer}")
                     headers_out = (
                         "HTTP/1.1 303 See Other\r\n"
                         "Location: /\r\n"
-                        f"Set-Cookie: mr_session={new_tok}; HttpOnly; SameSite=Strict; Path=/\r\n"
+                        f"Set-Cookie: mr_session={new_tok}; HttpOnly; SameSite=Strict; Path=/; Max-Age=28800\r\n"
+                        "Set-Cookie: mr_login_csrf=; Max-Age=0; Path=/\r\n"
                         "Content-Length: 0\r\n\r\n"
                     )
                     writer.write(headers_out.encode())
                     await writer.drain()
                     return
-                self.app.db.event("login_fail", f"peer={writer.get_extra_info('peername')}")
+
+                # Wrong password → global lock (any IP)
+                self.engage_login_lock()
+                lock_left = self.login_lock_remaining()
+                self.app.db.event("login_fail", f"peer={peer} lock={lock_left}s")
+                mins = self.app.cfg.panel_login_lock_minutes
+                login_csrf = secrets.token_urlsafe(24)
                 page = self.layout(
                     "Login",
-                    self._login_form(),
+                    self._login_form(
+                        locked_seconds=lock_left, login_csrf=login_csrf
+                    ),
                     user_ok=False,
-                    flash_err="Invalid password",
+                    flash_err=(
+                        f"Invalid password. Login locked for {mins} minutes "
+                        "(all IPs)."
+                    ),
                 )
-                await self._respond(writer, page)
+                await self._respond(
+                    writer,
+                    page,
+                    extra_headers=(
+                        f"Set-Cookie: mr_login_csrf={login_csrf}; HttpOnly; "
+                        f"SameSite=Strict; Path=/; Max-Age=600\r\n"
+                    ),
+                )
                 return
-            page = self.layout("Login", self._login_form(), user_ok=False)
-            await self._respond(writer, page)
+
+            # GET login
+            login_csrf = secrets.token_urlsafe(24)
+            page = self.layout(
+                "Login",
+                self._login_form(
+                    locked_seconds=lock_left, login_csrf=login_csrf
+                ),
+                user_ok=False,
+                flash_err=(
+                    f"Login locked — try again in {max(1, (lock_left + 59) // 60)} min."
+                    if lock_left > 0
+                    else ""
+                ),
+            )
+            await self._respond(
+                writer,
+                page,
+                extra_headers=(
+                    f"Set-Cookie: mr_login_csrf={login_csrf}; HttpOnly; "
+                    f"SameSite=Strict; Path=/; Max-Age=600\r\n"
+                ),
+            )
             return
 
         if path == "/logout":
-            self.destroy_session(token)
+            if method == "POST":
+                if authed and self.check_csrf(form, csrf or "") and self.same_origin(headers):
+                    self.destroy_session(token)
+            else:
+                # GET logout disabled — CSRF-safe POST only
+                pass
             headers_out = (
                 "HTTP/1.1 303 See Other\r\nLocation: /login\r\n"
-                "Set-Cookie: mr_session=; Max-Age=0; Path=/\r\nContent-Length: 0\r\n\r\n"
+                "Set-Cookie: mr_session=; Max-Age=0; Path=/\r\n"
+                "Content-Length: 0\r\n\r\n"
             )
             writer.write(headers_out.encode())
             await writer.drain()
             return
 
-        if not authed:
-            writer.write(b"HTTP/1.1 303 See Other\r\nLocation: /login\r\nContent-Length: 0\r\n\r\n")
+        if path == "/favicon.ico":
+            # Browsers may request /favicon.ico; we use data-URI in HTML.
+            await self._respond(writer, b"", status=204)
+            return
+
+        if not authed or not csrf:
+            writer.write(
+                b"HTTP/1.1 303 See Other\r\nLocation: /login\r\nContent-Length: 0\r\n\r\n"
+            )
             await writer.drain()
             return
+
+        if method == "POST":
+            if not self.same_origin(headers) or not self.check_csrf(form, csrf):
+                await self._respond(
+                    writer,
+                    self.layout(
+                        "Forbidden",
+                        "<div class='card'>CSRF / origin check failed. "
+                        "Reload the page and try again.</div>",
+                        csrf=csrf,
+                        flash_err="Request blocked",
+                    ),
+                    status=403,
+                )
+                return
 
         flash = form_get("_flash")
         flash_err = form_get("_flash_err")
 
         if path == "/" and method == "GET":
-            await self._respond(writer, self.layout("Dashboard", self._dashboard(), flash=flash, flash_err=flash_err))
+            await self._respond(
+                writer,
+                self.layout(
+                    "Dashboard",
+                    self._dashboard(),
+                    flash=flash,
+                    flash_err=flash_err,
+                    csrf=csrf,
+                ),
+            )
             return
         if path == "/senders":
-            await self._senders(writer, method, form)
+            await self._senders(writer, method, form, csrf)
             return
         if path == "/listen":
-            await self._listen(writer, method, form)
+            await self._listen(writer, method, form, csrf)
             return
         if path == "/rules":
-            await self._rules(writer, method, form, query)
+            await self._rules(writer, method, form, query, csrf)
             return
         if path == "/domains":
-            await self._domains(writer, method, form)
+            await self._domains(writer, method, form, csrf)
             return
         if path == "/events":
-            await self._respond(writer, self.layout("Events", self._events()))
+            await self._respond(
+                writer, self.layout("Events", self._events(), csrf=csrf)
+            )
             return
         if path == "/settings":
-            await self._settings(writer, method, form)
+            await self._settings(writer, method, form, csrf)
             return
 
-        await self._respond(writer, self.layout("Not found", "<div class='card'>Not found</div>"), status=404)
+        await self._respond(
+            writer,
+            self.layout("Not found", "<div class='card'>Not found</div>", csrf=csrf),
+            status=404,
+        )
 
     async def _respond(
-        self, writer: asyncio.StreamWriter, body: bytes, status: int = 200, extra_headers: str = ""
+        self,
+        writer: asyncio.StreamWriter,
+        body: bytes,
+        status: int = 200,
+        extra_headers: str = "",
     ) -> None:
-        reason = HTTPStatus(status).phrase
+        reason = HTTPStatus(status).phrase if status in HTTPStatus._value2member_map_ else "Error"
+        try:
+            reason = HTTPStatus(status).phrase
+        except ValueError:
+            reason = "Error"
+        csp = (
+            "default-src 'none'; style-src 'unsafe-inline'; "
+            "img-src 'self' data:; base-uri 'none'; form-action 'self'; "
+            "frame-ancestors 'none'"
+        )
         hdr = (
             f"HTTP/1.1 {status} {reason}\r\n"
             f"Content-Type: text/html; charset=utf-8\r\n"
@@ -1885,21 +2236,42 @@ class Panel:
             f"X-Frame-Options: DENY\r\n"
             f"X-Content-Type-Options: nosniff\r\n"
             f"Referrer-Policy: no-referrer\r\n"
-            f"Cache-Control: no-store\r\n"
+            f"Permissions-Policy: geolocation=(), microphone=(), camera=()\r\n"
+            f"Content-Security-Policy: {csp}\r\n"
+            f"Cache-Control: no-store, no-cache, must-revalidate\r\n"
+            f"Pragma: no-cache\r\n"
             f"{extra_headers}"
             f"\r\n"
         )
         writer.write(hdr.encode() + body)
         await writer.drain()
 
-    def _login_form(self) -> str:
-        return """
+    def _login_form(self, locked_seconds: int = 0, login_csrf: str = "") -> str:
+        locked = locked_seconds > 0
+        disabled = " disabled" if locked else ""
+        csrf_field = (
+            f'<input type="hidden" name="csrf" value="{h(login_csrf)}">'
+            if login_csrf
+            else ""
+        )
+        hint = (
+            f'<p class="muted">Locked for {max(1, (locked_seconds + 59) // 60)} more minute(s).</p>'
+            if locked
+            else '<p class="muted">No outbound compose — configure senders and forward rules only.</p>'
+        )
+        return f"""
         <div class="card" style="max-width:360px;margin:3rem auto;">
-          <h1>Admin login</h1>
-          <p class="muted">No outbound compose — configure senders and forward rules only.</p>
-          <form method="post" action="/login">
-            <label>Password <input type="password" name="password" required autofocus></label>
-            <p style="margin-top:0.8rem"><button type="submit">Sign in</button></p>
+          <h1>{BRAND_ICON_SVG}Admin login</h1>
+          {hint}
+          <form method="post" action="/login" autocomplete="off">
+            {csrf_field}
+            <label>Password
+              <input type="password" name="password" required autofocus
+                     autocomplete="current-password" minlength="12"{disabled}>
+            </label>
+            <p style="margin-top:0.8rem">
+              <button type="submit"{disabled}>Sign in</button>
+            </p>
           </form>
         </div>"""
 
@@ -1931,7 +2303,8 @@ class Panel:
           <table><thead><tr><th>Time</th><th>Kind</th><th>Detail</th></tr></thead><tbody>{rows or '<tr><td colspan=3 class=muted>None yet</td></tr>'}</tbody></table>
         </div>"""
 
-    async def _senders(self, writer: asyncio.StreamWriter, method: str, form: dict) -> None:
+    async def _senders(self, writer: asyncio.StreamWriter, method: str, form: dict, csrf: str) -> None:
+        ci = self.csrf_input(csrf)
         flash = flash_err = ""
         new_token_show = ""
         if method == "POST":
@@ -1996,9 +2369,9 @@ class Panel:
             <td>{'on' if r['enabled'] else 'off'}</td>
             <td>{h(r['note'])}</td>
             <td>
-              <form method="post" style="display:inline"><input type="hidden" name="action" value="rotate"><input type="hidden" name="id" value="{r['id']}"><button class="secondary" type="submit">Rotate token</button></form>
-              <form method="post" style="display:inline"><input type="hidden" name="action" value="toggle"><input type="hidden" name="id" value="{r['id']}"><button class="secondary" type="submit">Toggle</button></form>
-              <form method="post" style="display:inline" onsubmit="return confirm('Delete sender?')"><input type="hidden" name="action" value="delete"><input type="hidden" name="id" value="{r['id']}"><button class="danger" type="submit">Delete</button></form>
+              <form method="post" style="display:inline">{ci}<input type="hidden" name="action" value="rotate"><input type="hidden" name="id" value="{r['id']}"><button class="secondary" type="submit">Rotate token</button></form>
+              <form method="post" style="display:inline">{ci}<input type="hidden" name="action" value="toggle"><input type="hidden" name="id" value="{r['id']}"><button class="secondary" type="submit">Toggle</button></form>
+              <form method="post" style="display:inline" onsubmit="return confirm('Delete sender?')">{ci}<input type="hidden" name="action" value="delete"><input type="hidden" name="id" value="{r['id']}"><button class="danger" type="submit">Delete</button></form>
             </td></tr>"""
             for r in rows
         )
@@ -2012,7 +2385,7 @@ class Panel:
         <div class="card">
           <h1>Senders</h1>
           <p class="muted">SMTP AUTH accounts for apps. Tokens are stored hashed; plaintext is shown only once.</p>
-          <form method="post" class="row">
+          <form method="post" class="row">{ci}
             <input type="hidden" name="action" value="add">
             <label>Email <input name="email" type="email" required placeholder="noreply@example.com"></label>
             <label>Note <input name="note" placeholder="optional"></label>
@@ -2023,9 +2396,10 @@ class Panel:
           <table><thead><tr><th>Email / hint</th><th>Enabled</th><th>Note</th><th></th></tr></thead>
           <tbody>{table or '<tr><td colspan=4 class=muted>No senders</td></tr>'}</tbody></table>
         </div>"""
-        await self._respond(writer, self.layout("Senders", body, flash=flash, flash_err=flash_err))
+        await self._respond(writer, self.layout("Senders", body, flash=flash, flash_err=flash_err, csrf=csrf))
 
-    async def _listen(self, writer: asyncio.StreamWriter, method: str, form: dict) -> None:
+    async def _listen(self, writer: asyncio.StreamWriter, method: str, form: dict, csrf: str) -> None:
+        ci = self.csrf_input(csrf)
         flash = flash_err = ""
         if method == "POST":
             action = (form.get("action") or [""])[0]
@@ -2071,8 +2445,8 @@ class Panel:
         table = "".join(
             f"""<tr><td>{h(r['address'])}</td><td>{'on' if r['enabled'] else 'off'}</td><td>{h(r['note'])}</td>
             <td>
-            <form method="post" style="display:inline"><input type="hidden" name="action" value="toggle"><input type="hidden" name="id" value="{r['id']}"><button class="secondary">Toggle</button></form>
-            <form method="post" style="display:inline" onsubmit="return confirm('Delete?')"><input type="hidden" name="action" value="delete"><input type="hidden" name="id" value="{r['id']}"><button class="danger">Delete</button></form>
+            <form method="post" style="display:inline">{ci}<input type="hidden" name="action" value="toggle"><input type="hidden" name="id" value="{r['id']}"><button class="secondary">Toggle</button></form>
+            <form method="post" style="display:inline" onsubmit="return confirm('Delete?')">{ci}<input type="hidden" name="action" value="delete"><input type="hidden" name="id" value="{r['id']}"><button class="danger">Delete</button></form>
             </td></tr>"""
             for r in rows
         )
@@ -2081,7 +2455,7 @@ class Panel:
           <h1>Listen addresses</h1>
           <p class="muted">Inbound RCPT addresses this host accepts for forwarding. Point MX here. Patterns: <code>user@domain</code> or <code>*@domain</code>.
           Tip: for each domain you forward, add <code>*@that-domain</code>. Rules that match on <code>to</code> also check the SMTP envelope recipient.</p>
-          <form method="post" class="row">
+          <form method="post" class="row">{ci}
             <input type="hidden" name="action" value="add">
             <label>Address <input name="address" required placeholder="support@example.com"></label>
             <label>Note <input name="note"></label>
@@ -2090,11 +2464,12 @@ class Panel:
         </div>
         <div class="card"><table><thead><tr><th>Address</th><th>Enabled</th><th>Note</th><th></th></tr></thead>
         <tbody>{table or '<tr><td colspan=4 class=muted>None</td></tr>'}</tbody></table></div>"""
-        await self._respond(writer, self.layout("Listen", body, flash=flash, flash_err=flash_err))
+        await self._respond(writer, self.layout("Listen", body, flash=flash, flash_err=flash_err, csrf=csrf))
 
     async def _rules(
-        self, writer: asyncio.StreamWriter, method: str, form: dict, query: dict
+        self, writer: asyncio.StreamWriter, method: str, form: dict, query: dict, csrf: str
     ) -> None:
+        ci = self.csrf_input(csrf)
         flash = flash_err = ""
         edit_id = int((query.get("edit") or ["0"])[0] or 0)
 
@@ -2249,7 +2624,7 @@ class Panel:
         <div class="card">
           <h1>{h(form_title)}</h1>
           <p class="muted">Empty condition list = always match. Match mode all/any. Lower priority number runs first.</p>
-          <form method="post">
+          <form method="post">{ci}
             <input type="hidden" name="action" value="{action_val}">
             {rid_field}
             <div class="row">
@@ -2300,8 +2675,8 @@ class Panel:
                     <td>{'on' if r['enabled'] else 'off'}</td>
                     <td>
                       <a class="btn secondary" href="/rules?edit={r['id']}">Edit</a>
-                      <form method="post" style="display:inline"><input type="hidden" name="action" value="toggle"><input type="hidden" name="id" value="{r['id']}"><button class="secondary">Toggle</button></form>
-                      <form method="post" style="display:inline" onsubmit="return confirm('Delete rule?')"><input type="hidden" name="action" value="delete"><input type="hidden" name="id" value="{r['id']}"><button class="danger">Delete</button></form>
+                      <form method="post" style="display:inline">{ci}<input type="hidden" name="action" value="toggle"><input type="hidden" name="id" value="{r['id']}"><button class="secondary">Toggle</button></form>
+                      <form method="post" style="display:inline" onsubmit="return confirm('Delete rule?')">{ci}<input type="hidden" name="action" value="delete"><input type="hidden" name="id" value="{r['id']}"><button class="danger">Delete</button></form>
                     </td></tr>"""
                 )
         finally:
@@ -2313,9 +2688,10 @@ class Panel:
           <table><thead><tr><th>Pri</th><th>Name / conditions</th><th>Destinations</th><th>Enabled</th><th></th></tr></thead>
           <tbody>{''.join(list_html_parts) or '<tr><td colspan=5 class=muted>No rules</td></tr>'}</tbody></table>
         </div>"""
-        await self._respond(writer, self.layout("Rules", body, flash=flash, flash_err=flash_err))
+        await self._respond(writer, self.layout("Rules", body, flash=flash, flash_err=flash_err, csrf=csrf))
 
-    async def _domains(self, writer: asyncio.StreamWriter, method: str, form: dict) -> None:
+    async def _domains(self, writer: asyncio.StreamWriter, method: str, form: dict, csrf: str) -> None:
+        ci = self.csrf_input(csrf)
         flash = flash_err = ""
         if method == "POST":
             action = (form.get("action") or [""])[0]
@@ -2421,7 +2797,7 @@ class Panel:
                 <div class="token">{h(f'v=DMARC1; p=none;')}</div>
                 <p class="muted" style="margin-top:0.5rem">Optional reports:
                 <code>{h(f'v=DMARC1; p=none; rua=mailto:dmarc@{dom};')}</code></p>
-                <form method="post" onsubmit="return confirm('Delete DKIM for domain?')" style="margin-top:0.8rem">
+                <form method="post" onsubmit="return confirm('Delete DKIM for domain?')" style="margin-top:0.8rem">{ci}
                   <input type="hidden" name="action" value="delete">
                   <input type="hidden" name="domain" value="{h(dom)}">
                   <button class="danger" type="submit">Remove</button>
@@ -2435,7 +2811,7 @@ class Panel:
           <h1>Generate DKIM</h1>
           <p class="muted">Optional signing keys for outbound submission and forwards
           (SRS envelope uses <code>{h(host)}</code>).</p>
-          <form method="post" class="row">
+          <form method="post" class="row">{ci}
             <input type="hidden" name="action" value="add">
             <label>Domain <input name="domain" required placeholder="example.com"></label>
             <button type="submit">Generate DKIM</button>
@@ -2443,7 +2819,7 @@ class Panel:
         </div>
         {''.join(blocks) or '<div class="card muted">No DKIM domains yet — SPF/DMARC above still apply to every sending domain.</div>'}
         """
-        await self._respond(writer, self.layout("Domains", body, flash=flash, flash_err=flash_err))
+        await self._respond(writer, self.layout("Domains", body, flash=flash, flash_err=flash_err, csrf=csrf))
 
     def _events(self) -> str:
         conn = self.app.db.connect()
@@ -2474,7 +2850,8 @@ class Panel:
         <tbody>{qr or '<tr><td colspan=5 class=muted>Empty</td></tr>'}</tbody></table></div>
         """
 
-    async def _settings(self, writer: asyncio.StreamWriter, method: str, form: dict) -> None:
+    async def _settings(self, writer: asyncio.StreamWriter, method: str, form: dict, csrf: str) -> None:
+        ci = self.csrf_input(csrf)
         flash = flash_err = ""
         if method == "POST":
             p1 = (form.get("password") or [""])[0]
@@ -2501,6 +2878,7 @@ class Panel:
                     '<div class="card"><p>Password updated. <a href="/login">Log in</a></p></div>',
                     user_ok=False,
                     flash=flash,
+                    csrf="",
                 )
                 extra = "Set-Cookie: mr_session=; Max-Age=0; Path=/\r\n"
                 await self._respond(writer, page, extra_headers=extra)
@@ -2510,13 +2888,13 @@ class Panel:
         <div class="card">
           <h1>Settings</h1>
           <p class="muted">Hostname: {h(self.app.cfg.mail_hostname)} · data: {h(self.app.cfg.data_dir)}</p>
-          <form method="post" class="row">
+          <form method="post" class="row">{ci}
             <label>New admin password <input type="password" name="password" required minlength="12"></label>
             <label>Confirm <input type="password" name="password2" required minlength="12"></label>
             <button type="submit">Update password</button>
           </form>
         </div>"""
-        await self._respond(writer, self.layout("Settings", body, flash=flash, flash_err=flash_err))
+        await self._respond(writer, self.layout("Settings", body, flash=flash, flash_err=flash_err, csrf=csrf))
 
 
 # ---------------------------------------------------------------------------
@@ -2537,7 +2915,11 @@ class App:
         else:
             log.warning("could not detect server IPv4 — set PUBLIC_IP in env for SPF hints")
         if cfg.has_tls:
-            log.info("TLS enabled for STARTTLS: cert=%s", cfg.tls_cert_file)
+            log.info(
+                "TLS cert loaded: %s (submission STARTTLS=yes, inbound STARTTLS=%s)",
+                cfg.tls_cert_file,
+                "yes" if cfg.inbound_starttls else "no",
+            )
         else:
             log.warning(
                 "TLS not configured — SMTP clients on port %s will fail STARTTLS. "
