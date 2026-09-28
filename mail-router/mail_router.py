@@ -42,7 +42,7 @@ from urllib.request import urlopen
 # ---------------------------------------------------------------------------
 
 APP_NAME = "mail-router"
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 LOOP_HEADER = "X-Mail-Router"
 SRS_PREFIX = "SRS0"
 
@@ -94,6 +94,7 @@ class Config:
     # STARTTLS on inbound MX port 25 (set no only if a provider breaks on TLS)
     inbound_starttls: bool
     panel_login_lock_minutes: int
+    panel_login_fail_max: int
 
     @property
     def db_path(self) -> Path:
@@ -105,9 +106,16 @@ class Config:
 
     @property
     def has_tls(self) -> bool:
-        return bool(self.tls_cert_file and self.tls_key_file
-                    and Path(self.tls_cert_file).is_file()
-                    and Path(self.tls_key_file).is_file())
+        if not (self.tls_cert_file and self.tls_key_file):
+            return False
+        try:
+            return (
+                Path(self.tls_cert_file).is_file()
+                and Path(self.tls_key_file).is_file()
+            )
+        except OSError:
+            # Unreadable path (e.g. LE live/ is root-only) — treat as no TLS
+            return False
 
 
 def build_config() -> Config:
@@ -178,6 +186,9 @@ def build_config() -> Config:
         in ("1", "true", "yes", "on"),
         panel_login_lock_minutes=max(
             1, int(g("PANEL_LOGIN_LOCK_MINUTES", "10") or "10")
+        ),
+        panel_login_fail_max=max(
+            1, int(g("PANEL_LOGIN_FAIL_MAX", "3") or "3")
         ),
     )
 
@@ -337,6 +348,12 @@ class DB:
                     created_at TEXT NOT NULL,
                     expires_at TEXT NOT NULL,
                     csrf_token TEXT NOT NULL DEFAULT ''
+                );
+                CREATE TABLE IF NOT EXISTS login_challenges (
+                    token TEXT PRIMARY KEY,
+                    answer_hash TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS senders (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1808,14 +1825,22 @@ class Panel:
         left = int((until - utc_now()).total_seconds())
         if left <= 0:
             self.meta_delete("login_locked_until")
+            self.meta_delete("login_fail_count")
             return 0
         return left
+
+    def login_fail_count(self) -> int:
+        raw = self.meta_get("login_fail_count")
+        try:
+            return max(0, int(raw or "0"))
+        except ValueError:
+            return 0
 
     def engage_login_lock(self) -> None:
         mins = self.app.cfg.panel_login_lock_minutes
         until = utc_now() + timedelta(minutes=mins)
         self.meta_set("login_locked_until", until.strftime("%Y-%m-%dT%H:%M:%SZ"))
-        # Invalidate every panel session — global lockout after bad password
+        # Invalidate every panel session — global lockout after too many bad passwords
         conn = self.app.db.connect()
         try:
             conn.execute("DELETE FROM sessions")
@@ -1824,11 +1849,22 @@ class Panel:
             conn.close()
         self.app.db.event(
             "login_lock",
-            f"global lock {mins}m after failed password",
+            f"global lock {mins}m after {self.app.cfg.panel_login_fail_max} failed passwords",
         )
+
+    def record_login_failure(self) -> tuple[int, int]:
+        """Increment fail counter; lock after fail_max. Returns (fails, lock_seconds)."""
+        fails = self.login_fail_count() + 1
+        self.meta_set("login_fail_count", str(fails))
+        max_fails = self.app.cfg.panel_login_fail_max
+        if fails >= max_fails:
+            self.engage_login_lock()
+            return fails, self.login_lock_remaining()
+        return fails, 0
 
     def clear_login_lock(self) -> None:
         self.meta_delete("login_locked_until")
+        self.meta_delete("login_fail_count")
 
     def valid_session(self, token: Optional[str]) -> bool:
         return self.session_csrf(token) is not None
@@ -1908,24 +1944,93 @@ class Panel:
             return False
         return hmac.compare_digest(got, expected)
 
-    def same_origin(self, headers: dict[str, str]) -> bool:
-        host = (headers.get("host") or "").strip().lower()
+    @staticmethod
+    def _host_key(value: str) -> str:
+        """Normalize Host / Origin / Referer netloc for comparison."""
+        raw = (value or "").strip()
+        if not raw:
+            return ""
+        if "://" in raw:
+            raw = urlparse(raw).netloc
+        if "@" in raw:
+            raw = raw.rsplit("@", 1)[-1]
+        raw = raw.lower().rstrip(".")
+        if raw.endswith(":80"):
+            raw = raw[:-3]
+        elif raw.endswith(":443"):
+            raw = raw[:-4]
+        return raw
+
+    def origin_ok(self, headers: dict[str, str]) -> bool:
+        """If Origin/Referer present, must match Host. Missing is OK (CSRF covers it)."""
+        host = self._host_key(headers.get("host") or "")
         if not host:
             return False
         origin = (headers.get("origin") or "").strip()
+        if origin and origin.lower() != "null":
+            return self._host_key(origin) == host
         referer = (headers.get("referer") or "").strip()
-        if origin:
-            try:
-                return urlparse(origin).netloc.lower() == host
-            except Exception:
-                return False
         if referer:
-            try:
-                return urlparse(referer).netloc.lower() == host
-            except Exception:
+            return self._host_key(referer) == host
+        return True
+
+    def issue_login_challenge(self) -> tuple[str, str]:
+        """Create one-time login CSRF + math captcha. Returns (token, question)."""
+        a = secrets.randbelow(8) + 2
+        b = secrets.randbelow(8) + 2
+        token = secrets.token_urlsafe(32)
+        answer = str(a + b)
+        exp = utc_now() + timedelta(minutes=10)
+        conn = self.app.db.connect()
+        try:
+            conn.execute(
+                "DELETE FROM login_challenges WHERE expires_at < ?",
+                (utc_now_iso(),),
+            )
+            conn.execute(
+                """
+                INSERT INTO login_challenges (token, answer_hash, expires_at, created_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    token,
+                    hash_secret(answer, iterations=50_000),
+                    exp.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    utc_now_iso(),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return token, f"{a} + {b}"
+
+    def consume_login_challenge(self, token: str, captcha: str) -> bool:
+        """Validate and consume a one-time login challenge (CSRF + captcha)."""
+        token = (token or "").strip()
+        captcha = (captcha or "").strip()
+        if not token or not captcha:
+            return False
+        if len(token) > 128 or len(captcha) > 16:
+            return False
+        conn = self.app.db.connect()
+        try:
+            row = conn.execute(
+                "SELECT answer_hash, expires_at FROM login_challenges WHERE token = ?",
+                (token,),
+            ).fetchone()
+            # One-time: delete whether or not it validates
+            conn.execute("DELETE FROM login_challenges WHERE token = ?", (token,))
+            conn.commit()
+            if not row:
                 return False
-        # Non-browser clients without Origin/Referer — deny state-changing POSTs
-        return False
+            exp = datetime.strptime(row["expires_at"], "%Y-%m-%dT%H:%M:%SZ").replace(
+                tzinfo=timezone.utc
+            )
+            if exp < utc_now():
+                return False
+            return verify_secret(captcha, row["answer_hash"])
+        finally:
+            conn.close()
 
     async def handle(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
@@ -1999,40 +2104,33 @@ class Panel:
         if path == "/login":
             lock_left = self.login_lock_remaining()
             if method == "POST":
-                login_csrf_cookie = self._cookie_value(headers, "mr_login_csrf") or ""
-                login_csrf_form = form_get("csrf")
-                csrf_ok = bool(
-                    login_csrf_cookie
-                    and login_csrf_form
-                    and hmac.compare_digest(login_csrf_cookie, login_csrf_form)
+                challenge_ok = self.consume_login_challenge(
+                    form_get("csrf"), form_get("captcha")
                 )
-                if not csrf_ok or not self.same_origin(headers):
-                    login_csrf = secrets.token_urlsafe(24)
+                if not challenge_ok or not self.origin_ok(headers):
+                    login_csrf, captcha_q = self.issue_login_challenge()
                     page = self.layout(
                         "Login",
                         self._login_form(
-                            locked_seconds=lock_left, login_csrf=login_csrf
+                            locked_seconds=lock_left,
+                            login_csrf=login_csrf,
+                            captcha_question=captcha_q,
                         ),
                         user_ok=False,
                         flash_err="Security check failed — reload and try again",
                     )
-                    await self._respond(
-                        writer,
-                        page,
-                        extra_headers=(
-                            f"Set-Cookie: mr_login_csrf={login_csrf}; HttpOnly; "
-                            f"SameSite=Strict; Path=/; Max-Age=600\r\n"
-                        ),
-                    )
+                    await self._respond(writer, page)
                     return
 
                 if lock_left > 0:
                     mins = max(1, (lock_left + 59) // 60)
-                    login_csrf = secrets.token_urlsafe(24)
+                    login_csrf, captcha_q = self.issue_login_challenge()
                     page = self.layout(
                         "Login",
                         self._login_form(
-                            locked_seconds=lock_left, login_csrf=login_csrf
+                            locked_seconds=lock_left,
+                            login_csrf=login_csrf,
+                            captcha_question=captcha_q,
                         ),
                         user_ok=False,
                         flash_err=(
@@ -2040,14 +2138,7 @@ class Panel:
                             "(all IPs)."
                         ),
                     )
-                    await self._respond(
-                        writer,
-                        page,
-                        extra_headers=(
-                            f"Set-Cookie: mr_login_csrf={login_csrf}; HttpOnly; "
-                            f"SameSite=Strict; Path=/; Max-Age=600\r\n"
-                        ),
-                    )
+                    await self._respond(writer, page)
                     return
 
                 password = form_get("password")
@@ -2068,47 +2159,55 @@ class Panel:
                     headers_out = (
                         "HTTP/1.1 303 See Other\r\n"
                         "Location: /\r\n"
-                        f"Set-Cookie: mr_session={new_tok}; HttpOnly; SameSite=Strict; Path=/; Max-Age=28800\r\n"
-                        "Set-Cookie: mr_login_csrf=; Max-Age=0; Path=/\r\n"
+                        f"Set-Cookie: mr_session={new_tok}; HttpOnly; SameSite=Lax; "
+                        f"Path=/; Max-Age=28800\r\n"
                         "Content-Length: 0\r\n\r\n"
                     )
                     writer.write(headers_out.encode())
                     await writer.drain()
                     return
 
-                # Wrong password → global lock (any IP)
-                self.engage_login_lock()
-                lock_left = self.login_lock_remaining()
-                self.app.db.event("login_fail", f"peer={peer} lock={lock_left}s")
+                # Wrong password → count failures; lock after PANEL_LOGIN_FAIL_MAX
+                fails, lock_left = self.record_login_failure()
+                max_fails = self.app.cfg.panel_login_fail_max
                 mins = self.app.cfg.panel_login_lock_minutes
-                login_csrf = secrets.token_urlsafe(24)
+                self.app.db.event(
+                    "login_fail",
+                    f"peer={peer} fails={fails}/{max_fails} lock={lock_left}s",
+                )
+                login_csrf, captcha_q = self.issue_login_challenge()
+                if lock_left > 0:
+                    flash_err = (
+                        f"Invalid password. Login locked for {mins} minutes "
+                        f"after {max_fails} failed attempts (all IPs)."
+                    )
+                else:
+                    left_tries = max_fails - fails
+                    flash_err = (
+                        f"Invalid password. {left_tries} attempt(s) left "
+                        f"before a {mins}-minute lock."
+                    )
                 page = self.layout(
                     "Login",
                     self._login_form(
-                        locked_seconds=lock_left, login_csrf=login_csrf
+                        locked_seconds=lock_left,
+                        login_csrf=login_csrf,
+                        captcha_question=captcha_q,
                     ),
                     user_ok=False,
-                    flash_err=(
-                        f"Invalid password. Login locked for {mins} minutes "
-                        "(all IPs)."
-                    ),
+                    flash_err=flash_err,
                 )
-                await self._respond(
-                    writer,
-                    page,
-                    extra_headers=(
-                        f"Set-Cookie: mr_login_csrf={login_csrf}; HttpOnly; "
-                        f"SameSite=Strict; Path=/; Max-Age=600\r\n"
-                    ),
-                )
+                await self._respond(writer, page)
                 return
 
             # GET login
-            login_csrf = secrets.token_urlsafe(24)
+            login_csrf, captcha_q = self.issue_login_challenge()
             page = self.layout(
                 "Login",
                 self._login_form(
-                    locked_seconds=lock_left, login_csrf=login_csrf
+                    locked_seconds=lock_left,
+                    login_csrf=login_csrf,
+                    captcha_question=captcha_q,
                 ),
                 user_ok=False,
                 flash_err=(
@@ -2117,23 +2216,13 @@ class Panel:
                     else ""
                 ),
             )
-            await self._respond(
-                writer,
-                page,
-                extra_headers=(
-                    f"Set-Cookie: mr_login_csrf={login_csrf}; HttpOnly; "
-                    f"SameSite=Strict; Path=/; Max-Age=600\r\n"
-                ),
-            )
+            await self._respond(writer, page)
             return
 
         if path == "/logout":
             if method == "POST":
-                if authed and self.check_csrf(form, csrf or "") and self.same_origin(headers):
+                if authed and self.check_csrf(form, csrf or "") and self.origin_ok(headers):
                     self.destroy_session(token)
-            else:
-                # GET logout disabled — CSRF-safe POST only
-                pass
             headers_out = (
                 "HTTP/1.1 303 See Other\r\nLocation: /login\r\n"
                 "Set-Cookie: mr_session=; Max-Age=0; Path=/\r\n"
@@ -2156,7 +2245,7 @@ class Panel:
             return
 
         if method == "POST":
-            if not self.same_origin(headers) or not self.check_csrf(form, csrf):
+            if not self.check_csrf(form, csrf) or not self.origin_ok(headers):
                 await self._respond(
                     writer,
                     self.layout(
@@ -2246,7 +2335,12 @@ class Panel:
         writer.write(hdr.encode() + body)
         await writer.drain()
 
-    def _login_form(self, locked_seconds: int = 0, login_csrf: str = "") -> str:
+    def _login_form(
+        self,
+        locked_seconds: int = 0,
+        login_csrf: str = "",
+        captcha_question: str = "",
+    ) -> str:
         locked = locked_seconds > 0
         disabled = " disabled" if locked else ""
         csrf_field = (
@@ -2257,8 +2351,16 @@ class Panel:
         hint = (
             f'<p class="muted">Locked for {max(1, (locked_seconds + 59) // 60)} more minute(s).</p>'
             if locked
-            else '<p class="muted">No outbound compose — configure senders and forward rules only.</p>'
+            else ""
         )
+        captcha = ""
+        if captcha_question and not locked:
+            captcha = f"""
+            <label>Security check
+              <span class="muted">What is {h(captcha_question)}?</span>
+              <input type="text" name="captcha" required autocomplete="off"
+                     inputmode="numeric" pattern="[0-9]+"{disabled}>
+            </label>"""
         return f"""
         <div class="card" style="max-width:360px;margin:3rem auto;">
           <h1>{BRAND_ICON_SVG}Admin login</h1>
@@ -2269,6 +2371,7 @@ class Panel:
               <input type="password" name="password" required autofocus
                      autocomplete="current-password" minlength="12"{disabled}>
             </label>
+            {captcha}
             <p style="margin-top:0.8rem">
               <button type="submit"{disabled}>Sign in</button>
             </p>
@@ -2977,6 +3080,12 @@ class App:
             self.cfg.panel_bind,
             self.cfg.panel_port,
         )
+        if self.cfg.panel_bind not in ("127.0.0.1", "localhost", "::1"):
+            log.warning(
+                "PANEL_BIND=%s exposes the admin UI on the network — "
+                "prefer 127.0.0.1 and an SSH tunnel",
+                self.cfg.panel_bind,
+            )
 
         srv_in = await self._try_listen(
             "SMTP inbound",
@@ -3030,11 +3139,14 @@ def reset_admin_password(cfg: Config, new_password: str) -> None:
                 (hash_secret(new_password), utc_now_iso()),
             )
         conn.execute("DELETE FROM sessions")
+        conn.execute("DELETE FROM login_challenges")
+        conn.execute("DELETE FROM meta WHERE key = 'login_locked_until'")
+        conn.execute("DELETE FROM meta WHERE key = 'login_fail_count'")
         db._event(conn, "admin_reset", "password reset via CLI")
         conn.commit()
     finally:
         conn.close()
-    print("mail-router: admin password updated; existing sessions cleared")
+    print("mail-router: admin password updated; sessions and login lock cleared")
 
 
 def main(argv: Optional[list[str]] = None) -> int:

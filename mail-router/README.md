@@ -57,9 +57,33 @@ Important env values:
 | `MAIL_HOSTNAME` | Public hostname of this host |
 | `ADMIN_PASSWORD` | First-boot panel password (min 12 chars); change after login |
 | `PANEL_BIND` | Default `127.0.0.1` — keep it unless behind a trusted reverse proxy |
+| `PANEL_LOGIN_FAIL_MAX` | Wrong passwords before lock (default `3`) |
+| `PANEL_LOGIN_LOCK_MINUTES` | Lock duration after too many failures (default `10`) |
 | `TLS_CERT_FILE` / `TLS_KEY_FILE` | Optional STARTTLS for SMTP |
 
-Panel: `http://127.0.0.1:8088` (SSH tunnel or reverse proxy).
+Panel: `http://127.0.0.1:8088` on the server (not public). Open it from your PC with an SSH tunnel.
+
+### Open the panel (SSH tunnel)
+
+Panel listens only on the server’s localhost. From Windows / macOS / Linux, forward a **local** port to the server panel port (`PANEL_PORT`, default `8088`).
+
+```bash
+# Local port 8088 → server panel 8088 (use your SSH host/port)
+ssh -L 8088:127.0.0.1:8088 -p SSH_PORT root@SERVER_IP
+```
+
+If local `8088` is already in use, pick another local port (e.g. `8089`) — the number **before** the first colon is yours; the one after `127.0.0.1:` is the panel on the server:
+
+```bash
+ssh -L 8089:127.0.0.1:8088 -p SSH_PORT root@SERVER_IP
+```
+
+Keep that SSH session open, then browse:
+
+- same local port: [http://127.0.0.1:8088](http://127.0.0.1:8088)
+- or with `8089`: [http://127.0.0.1:8089](http://127.0.0.1:8089)
+
+`SSH_PORT` is whatever port your `sshd` uses (often `22`; `Connection refused` on 22 usually means a different port).
 
 Without systemd (foreground/background via pid file):
 
@@ -91,11 +115,13 @@ Match mode: **all** or **any** conditions. Lower **priority** number runs first.
 
 ## Security notes
 
-- Panel defaults to localhost; expose only via SSH tunnel or authenticated reverse proxy + TLS.
+- Panel defaults to **localhost only** (`PANEL_BIND=127.0.0.1`). Open with an SSH tunnel; do not bind `0.0.0.0`.
+- Login uses a one-time server-side CSRF token + math captcha. After `PANEL_LOGIN_FAIL_MAX` wrong passwords (default **3**), all logins lock for `PANEL_LOGIN_LOCK_MINUTES` (default **10**).
+- systemd runs as user `mail-router` with filesystem sandbox (`ProtectSystem`, `ProtectHome`, `ReadWritePaths` limited to data/config). Compromising the process does not grant access to other users’ home dirs or unrelated paths.
 - Sender tokens are stored as PBKDF2 hashes (shown once in the UI).
 - Unknown recipients are rejected (not an open relay).
 - Loop protection: `X-Mail-Router` header + hop limit.
-- Daily quotas for submitters (env defaults; overridable later per design).
+- Daily quotas for submitters (env defaults).
 - Queue TTL drops undeliverable mail after retries (no silent infinite store).
 
 ---

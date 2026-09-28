@@ -175,6 +175,17 @@ cmd_install() {
   install -d -m 755 "${INSTALL_DIR}" /etc/mail-router
   install -d -m 750 /var/lib/mail-router
 
+  # Dedicated service user — process cannot read unrelated home dirs / other apps
+  if ! id -u mail-router >/dev/null 2>&1; then
+    useradd --system --home-dir /var/lib/mail-router --shell /usr/sbin/nologin \
+      --comment "mail-router daemon" mail-router
+    echo "install: created system user mail-router"
+  fi
+  # Let's Encrypt privkey is often group ssl-cert
+  if getent group ssl-cert >/dev/null 2>&1; then
+    usermod -a -G ssl-cert mail-router || true
+  fi
+
   # Never redirect onto the same path being read (SRC==INSTALL_DIR truncates files to empty).
   tmpf="$(mktemp)"
   strip_crlf < "${SCRIPT_DIR}/mail_router.py" > "${tmpf}"
@@ -199,22 +210,67 @@ cmd_install() {
   else
     tmpf="$(mktemp)"
     strip_crlf < "${src_env}" > "${tmpf}"
-    install -m 600 "${tmpf}" /etc/mail-router/mail-router.env
+    install -m 600 -o root -g mail-router "${tmpf}" /etc/mail-router/mail-router.env
     rm -f "${tmpf}"
     echo "install: synced ${src_env} → /etc/mail-router/mail-router.env"
   fi
+  chown root:mail-router /etc/mail-router
+  chmod 750 /etc/mail-router
+  chmod 640 /etc/mail-router/mail-router.env 2>/dev/null || true
+  chown root:mail-router /etc/mail-router/mail-router.env 2>/dev/null || true
 
   # Point runtime scripts at installed copy
   ln -sfn "${INSTALL_DIR}/mail-router.sh" /usr/local/bin/mail-router
 
   # Prefer Absolute DATA_DIR from env for systemd ReadWritePaths
   data_dir_install="$(read_data_dir /etc/mail-router/mail-router.env)"
-  install -d -m 750 "${data_dir_install}"
+  install -d -m 750 -o mail-router -g mail-router "${data_dir_install}"
+  chown -R mail-router:mail-router "${data_dir_install}"
+  chmod 750 "${data_dir_install}"
+
+  local le_ok=0
+  # STARTTLS needs to read Let's Encrypt keys as non-root.
+  # certbot often uses 0700 on live/archive — ACL + execute on dirs required.
+  if [[ -d /etc/letsencrypt ]]; then
+    if command -v setfacl >/dev/null 2>&1; then
+      setfacl -m u:mail-router:rx /etc/letsencrypt 2>/dev/null || true
+      setfacl -R -m u:mail-router:rX /etc/letsencrypt/live /etc/letsencrypt/archive 2>/dev/null || true
+      setfacl -R -d -m u:mail-router:rX /etc/letsencrypt/live /etc/letsencrypt/archive 2>/dev/null || true
+    fi
+    # Fallback if ACL unavailable: allow ssl-cert group to traverse + read
+    if getent group ssl-cert >/dev/null 2>&1; then
+      chgrp -R ssl-cert /etc/letsencrypt/live /etc/letsencrypt/archive 2>/dev/null || true
+      find /etc/letsencrypt/live /etc/letsencrypt/archive -type d -exec chmod 750 {} \; 2>/dev/null || true
+      find /etc/letsencrypt/live /etc/letsencrypt/archive -type f -name 'fullchain*.pem' -exec chmod 644 {} \; 2>/dev/null || true
+      find /etc/letsencrypt/live /etc/letsencrypt/archive -type f -name 'cert*.pem' -exec chmod 644 {} \; 2>/dev/null || true
+      find /etc/letsencrypt/live /etc/letsencrypt/archive -type f -name 'chain*.pem' -exec chmod 644 {} \; 2>/dev/null || true
+      find /etc/letsencrypt/live /etc/letsencrypt/archive -type f -name 'privkey*.pem' -exec chmod 640 {} \; 2>/dev/null || true
+    fi
+    le_ok=0
+    for f in /etc/letsencrypt/live/*/fullchain.pem; do
+      [[ -e "${f}" ]] || continue
+      if runuser -u mail-router -- test -r "${f}"; then
+        le_ok=1
+        break
+      fi
+    done
+    if [[ "${le_ok}" -eq 0 ]]; then
+      echo "install: WARNING — mail-router cannot read Let's Encrypt certs; STARTTLS may be off" >&2
+      echo "install: fix with: setfacl -R -m u:mail-router:rX /etc/letsencrypt/live /etc/letsencrypt/archive" >&2
+    else
+      echo "install: Let's Encrypt certs readable by mail-router"
+    fi
+  fi
 
   panel_bind="$(sed -n 's/^PANEL_BIND=//p' /etc/mail-router/mail-router.env | head -n1 | tr -d '\r' | tr -d '"' | tr -d "'")"
   panel_port="$(sed -n 's/^PANEL_PORT=//p' /etc/mail-router/mail-router.env | head -n1 | tr -d '\r' | tr -d '"' | tr -d "'")"
   panel_bind="${panel_bind:-127.0.0.1}"
   panel_port="${panel_port:-8088}"
+
+  local supp_groups=""
+  if getent group ssl-cert >/dev/null 2>&1; then
+    supp_groups="SupplementaryGroups=ssl-cert"
+  fi
 
   cat > "${SYSTEMD_UNIT}" <<EOF
 [Unit]
@@ -224,37 +280,72 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+User=mail-router
+Group=mail-router
+${supp_groups}
 Environment=MAIL_ROUTER_ENV=/etc/mail-router/mail-router.env
+Environment=PYTHONDONTWRITEBYTECODE=1
 WorkingDirectory=${INSTALL_DIR}
 ExecStart=/usr/bin/python3 -u ${INSTALL_DIR}/mail_router.py
 Restart=always
 RestartSec=3
 LimitNOFILE=65535
+UMask=0077
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=mail-router
 
-# Hardening (keep write access to data + config)
+# Bind privileged SMTP ports without full root
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+
+# Filesystem isolation — process cannot read other users' homes or write outside data/config
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
 ReadWritePaths=${data_dir_install} /etc/mail-router /var/lib/mail-router
+ReadOnlyPaths=-/etc/letsencrypt
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
+  # Preflight as service user (clear errors before restart loop)
+  if ! runuser -u mail-router -- test -r /etc/mail-router/mail-router.env; then
+    echo "install: ERROR — mail-router cannot read /etc/mail-router/mail-router.env" >&2
+    ls -la /etc/mail-router/ >&2 || true
+    exit 1
+  fi
+  if ! runuser -u mail-router -- test -w "${data_dir_install}"; then
+    echo "install: ERROR — mail-router cannot write ${data_dir_install}" >&2
+    ls -la "${data_dir_install}" >&2 || true
+    exit 1
+  fi
+
   systemctl daemon-reload
   systemctl enable mail-router.service
   systemctl restart mail-router.service
-  sleep 1
+  sleep 2
+  if ! systemctl is-active --quiet mail-router.service; then
+    echo "install: ERROR — service failed to stay up. Recent logs:" >&2
+    journalctl -u mail-router -n 80 --no-pager >&2 || true
+    exit 1
+  fi
   systemctl --no-pager --full status mail-router.service || true
-  echo "install: mail-router.service enabled and started"
+  echo "install: mail-router.service enabled and started (user=mail-router)"
   echo "install: panel bind ${panel_bind}:${panel_port}"
-  if [[ "${panel_bind}" == "127.0.0.1" || "${panel_bind}" == "localhost" ]]; then
+  if [[ "${panel_bind}" == "127.0.0.1" || "${panel_bind}" == "localhost" || "${panel_bind}" == "::1" ]]; then
     echo "install: open via: ssh -L ${panel_port}:127.0.0.1:${panel_port} root@SERVER"
     echo "install: then browse http://127.0.0.1:${panel_port}"
   else
+    echo "install: WARNING — PANEL_BIND is not localhost; admin UI is network-exposed"
     echo "install: try http://SERVER_IP:${panel_port} (ensure firewall allows it)"
   fi
   echo "install: logs: journalctl -u mail-router -n 50 --no-pager"
