@@ -24,6 +24,10 @@ $table_prefix = 'wp_';
 define( 'WP_HOME', 'https://example.com/' );
 define( 'WP_SITEURL', 'https://example.com/' );
 
+# Theme/plugin/core edits via admin UI — deploy via image rebuild / wp-content mount instead
+define( 'DISALLOW_FILE_EDIT', true );
+define( 'DISALLOW_FILE_MODS', true );
+
 define( 'WP_DEBUG', false );
 
 if ( ! defined( 'ABSPATH' ) ) {

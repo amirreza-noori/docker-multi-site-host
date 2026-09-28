@@ -25,17 +25,10 @@ if [ ! -f "${WP_CONFIG}" ] && [ -f "${WP_PATH}/wp-config-sample.php" ]; then
     mv "${WP_CONFIG}.tmp" "${WP_CONFIG}"
   fi
 
-  chown application:application "${WP_CONFIG}"
-  chmod 644 "${WP_CONFIG}"
+  # Readable by PHP (application); not writable
+  chown root:application "${WP_CONFIG}"
+  chmod 640 "${WP_CONFIG}"
 fi
-
-fix_mount_file() {
-  f=$1
-  if [ -f "$f" ]; then
-    chown application:application "$f"
-    chmod 644 "$f"
-  fi
-}
 
 # Host bind-mount for full wp-content (themes, plugins, uploads, W3TC, languages)
 mkdir -p \
@@ -57,10 +50,8 @@ if [ -d "$OC" ]; then
   exit 1
 fi
 
+# Only wp-content may be writable by PHP; leave core / wp-config / .htaccess root-owned
 chown -R application:application "${WP_CONTENT}" || true
-fix_mount_file "$OC"
-fix_mount_file "${WP_PATH}/.htaccess"
-fix_mount_file "${WP_CONFIG}"
 
 if [ "$#" -eq 0 ]; then
   set -- supervisord

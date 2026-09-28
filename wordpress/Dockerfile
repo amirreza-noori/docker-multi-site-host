@@ -20,7 +20,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     pecl install timezonedb; \
     pecl install igbinary
 
-ARG WORDPRESS_VERSION=6.8
+# Pinned release — rebuild image to upgrade core (sites block wordpress.org)
+ARG WORDPRESS_VERSION=7.1.2
 RUN set -eux; \
     curl -fsSL "https://wordpress.org/wordpress-${WORDPRESS_VERSION}.tar.gz" -o /tmp/wordpress.tar.gz; \
     mkdir -p /app; \
@@ -28,7 +29,7 @@ RUN set -eux; \
     rm /tmp/wordpress.tar.gz
 
 ARG WORDPRESS_LOCALE=en_US
-ARG WORDPRESS_VERSION=6.8
+ARG WORDPRESS_VERSION=7.1.2
 RUN set -eux; \
     mkdir -p /opt/wordpress-languages; \
     if [ "${WORDPRESS_LOCALE}" != "en_US" ]; then \
@@ -39,7 +40,13 @@ RUN set -eux; \
       cp -a /app/wp-content/languages/. /opt/wordpress-languages/; \
     fi
 
-RUN chown -R application:application /app /opt/wordpress-languages
+# Core owned by root (PHP runs as application and must not modify it).
+# Only wp-content is writable by the application user.
+RUN set -eux; \
+    chown -R root:root /app; \
+    find /app -type d -exec chmod 755 {} +; \
+    find /app -type f -exec chmod 644 {} +; \
+    chown -R application:application /app/wp-content /opt/wordpress-languages
 
 COPY docker/wordpress-entrypoint.sh /usr/local/bin/wordpress-entrypoint.sh
 RUN chmod +x /usr/local/bin/wordpress-entrypoint.sh \

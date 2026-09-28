@@ -5,13 +5,13 @@ services:
       context: ../../wordpress
       dockerfile: Dockerfile
       args:
-        WORDPRESS_VERSION: "6.8"
+        WORDPRESS_VERSION: "7.1.2"
         WORDPRESS_LOCALE: fa_IR
         # PHP 7.4: uncomment
         # PHP_VERSION: "7.4"
     # PHP 7.4: uncomment and comment out the image line below
-    # image: wordpress-server:6.8-fa_IR-php7.4
-    image: wordpress-server:6.8-fa_IR
+    # image: wordpress-server:7.1.2-fa_IR-php7.4
+    image: wordpress-server:7.1.2-fa_IR
     container_name: example-com
     hostname: example.com
     restart: always
@@ -23,8 +23,9 @@ services:
     environment:
       CONTAINER_NAME: example-com
     volumes:
-      - ./wp-config.php:/app/wp-config.php
-      - ./.htaccess:/app/.htaccess
+      # Core lives in the image (root-owned). Only config + wp-content are mounted.
+      - ./wp-config.php:/app/wp-config.php:ro
+      - ./.htaccess:/app/.htaccess:ro
       # Full wp-content: themes, plugins, uploads, W3TC config/drop-ins, languages, cache
       - ./wp-content:/app/wp-content
       - ./etc/php.ini:/opt/docker/etc/php/php.ini:ro
