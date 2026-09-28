@@ -40,13 +40,15 @@ RUN set -eux; \
       cp -a /app/wp-content/languages/. /opt/wordpress-languages/; \
     fi
 
-# Core owned by root (PHP runs as application and must not modify it).
-# Only wp-content is writable by the application user.
+# Core readable by PHP (application) but not writable — only wp-content stays writable.
+# Directory write bit off prevents create/delete/replace of core files.
 RUN set -eux; \
-    chown -R root:root /app; \
-    find /app -type d -exec chmod 755 {} +; \
-    find /app -type f -exec chmod 644 {} +; \
-    chown -R application:application /app/wp-content /opt/wordpress-languages
+    chown -R application:application /app /opt/wordpress-languages; \
+    find /app -type d -exec chmod 555 {} +; \
+    find /app -type f -exec chmod 444 {} +; \
+    find /app/wp-content -type d -exec chmod 755 {} +; \
+    find /app/wp-content -type f -exec chmod 644 {} +; \
+    chmod 755 /app
 
 COPY docker/wordpress-entrypoint.sh /usr/local/bin/wordpress-entrypoint.sh
 RUN chmod +x /usr/local/bin/wordpress-entrypoint.sh \
