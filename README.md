@@ -12,7 +12,9 @@ Each folder under `SITES_DIR` has one `haproxy.cfg` (frontend + backend, split b
 
 1. Fill `.env`, then `docker compose up -d --build`
 2. In `docker-compose.sites.yml`, uncomment the `_admintools` include block, then `docker compose up -d`
-3. Edit `$SITES_DIR/_admintools/haproxy.cfg` (hostnames above `## backend ##`)
+3. Portainer / phpMyAdmin bind to **localhost only** (not public HAProxy). Use an SSH tunnel:
+   `ssh -L 9000:127.0.0.1:9000 -L 8081:127.0.0.1:8081 user@server`
+   then open `http://127.0.0.1:9000` (Portainer) and `http://127.0.0.1:8081` (phpMyAdmin)
 4. `docker compose restart haproxy`
 
 ## Add a WordPress site

@@ -14,6 +14,8 @@ alwaysApply: true
 - Each site `docker-compose.yml`: **unique top-level service name** (same as folder/`container_name`); never reuse service names across sites.
 - HAProxy assemble: `_admintools` first, then site folders (skip `_template_wordpress/`, `_template_static/`).
 - **Networks:** `database` = MariaDB, WordPress, backup-runner, phpMyAdmin. `database-monitor` = extra network on phpMyAdmin only; external DBs for inspection join this network, not `database`.
+- **_admintools:** Portainer + phpMyAdmin on `127.0.0.1` only (SSH tunnel); not on public HAProxy. `PMA_ARBITRARY=0`, `PMA_HOST=mariadb`.
+- **WordPress hardening:** core 444/555; deny `xmlrpc.php` and PHP under `uploads` (Apache vhost + `.htaccess`); `disable_functions` in template `php.ini`; entrypoint keeps the `wp-content` directory writable by the PHP user so WordPress selects the direct filesystem. Writable trees are `uploads`, `cache`, and `w3tc-config`, plus existing drop-ins. Plugins and themes stay root-owned.
 
 ## haproxy.cfg (per site)
 

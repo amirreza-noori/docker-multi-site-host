@@ -7,6 +7,21 @@ WP_CONTENT="${WP_PATH}/wp-content"
 CONTAINER_NAME="${CONTAINER_NAME:-wordpress}"
 WP_DB_HOST_DEFAULT="${WORDPRESS_DB_HOST:-mariadb:3306}"
 
+UPLOADS_HTACCESS_BODY='# Deny script execution under uploads (webshells)
+<FilesMatch "\.ph(p[0-9]?|tml|ar|ps)$">
+	<IfModule mod_authz_core.c>
+		Require all denied
+	</IfModule>
+	<IfModule !mod_authz_core.c>
+		Order deny,allow
+		Deny from all
+	</IfModule>
+</FilesMatch>
+Options -ExecCGI
+RemoveHandler .php .phtml .php3 .php4 .php5 .php7 .php8 .phar
+RemoveType .php .phtml .php3 .php4 .php5 .php7 .php8 .phar
+'
+
 if [ ! -f "${WP_CONFIG}" ] && [ -f "${WP_PATH}/wp-config-sample.php" ]; then
   cp "${WP_PATH}/wp-config-sample.php" "${WP_CONFIG}"
 
@@ -43,7 +58,9 @@ mkdir -p \
   "${WP_CONTENT}/themes" \
   "${WP_CONTENT}/plugins" \
   "${WP_CONTENT}/uploads" \
-  "${WP_CONTENT}/languages"
+  "${WP_CONTENT}/languages" \
+  "${WP_CONTENT}/cache" \
+  "${WP_CONTENT}/upgrade"
 
 # Locale pack from image when the mounted languages dir is still empty
 if [ -d /opt/wordpress-languages ] \
@@ -58,8 +75,47 @@ if [ -d "$OC" ]; then
   exit 1
 fi
 
-# Only wp-content may be writable; keep core mode from the image (444/555)
-chown -R application:application "${WP_CONTENT}" || true
+# Ensure uploads cannot execute PHP even on sites created before the template .htaccess existed
+UPLOADS_HTACCESS="${WP_CONTENT}/uploads/.htaccess"
+if [ ! -f "${UPLOADS_HTACCESS}" ]; then
+  printf '%s\n' "${UPLOADS_HTACCESS_BODY}" > "${UPLOADS_HTACCESS}"
+fi
+
+# PHP must be able to create a file in wp-content or WordPress selects FTP and admin calls 500.
+# Plugins and themes stay root-owned so wp-admin cannot change code.
+chown application:application "${WP_CONTENT}" || true
+chmod 755 "${WP_CONTENT}" || true
+for path in "${WP_CONTENT}"/*; do
+  [ -e "${path}" ] || continue
+  base="$(basename "${path}")"
+  case "${base}" in
+    uploads|cache|w3tc-config) continue ;;
+    advanced-cache.php|object-cache.php|db.php|sunrise.php) continue ;;
+  esac
+  chown -R root:root "${path}" || true
+  chmod -R u=rwX,go=rX "${path}" || true
+done
+
+# Media library, disk cache files, and W3TC config (master.php)
+for d in uploads cache w3tc-config; do
+  target="${WP_CONTENT}/${d}"
+  mkdir -p "${target}"
+  chown -R application:application "${target}" || true
+  chmod -R u=rwX,g=rwX,o=rX "${target}" || true
+done
+for f in advanced-cache.php object-cache.php db.php sunrise.php; do
+  if [ -f "${WP_CONTENT}/${f}" ]; then
+    chown application:application "${WP_CONTENT}/${f}" || true
+    chmod 644 "${WP_CONTENT}/${f}" || true
+  fi
+done
+# Sticky on uploads: PHP can replace its own files, not the root-owned script block
+if [ -f "${UPLOADS_HTACCESS}" ]; then
+  chown root:root "${UPLOADS_HTACCESS}" || true
+  chmod 644 "${UPLOADS_HTACCESS}" || true
+fi
+chmod 1775 "${WP_CONTENT}/uploads" || true
+
 ensure_readable_mount "${WP_CONFIG}"
 ensure_readable_mount "${WP_PATH}/.htaccess"
 

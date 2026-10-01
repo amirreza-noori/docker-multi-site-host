@@ -27,6 +27,9 @@ define( 'WP_SITEURL', 'https://example.com/' );
 # Theme/plugin/core edits via admin UI — deploy via image rebuild / wp-content mount instead
 define( 'DISALLOW_FILE_EDIT', true );
 define( 'DISALLOW_FILE_MODS', true );
+define( 'DISALLOW_UNFILTERED_HTML', true );
+define( 'WP_AUTO_UPDATE_CORE', false );
+define( 'AUTOMATIC_UPDATER_DISABLED', true );
 
 define( 'WP_DEBUG', false );
 

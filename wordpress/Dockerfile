@@ -50,6 +50,13 @@ RUN set -eux; \
     find /app/wp-content -type f -exec chmod 644 {} +; \
     chmod 755 /app
 
+# SSH is off by default in webdevops; keep it explicitly disabled (no sshd in WP containers)
+RUN docker-service-disable ssh 2>/dev/null || true
+
+# Apache: deny xmlrpc.php and PHP under uploads (belt-and-suspenders with site .htaccess)
+COPY docker/apache-hardening.conf /opt/docker/etc/httpd/vhost.common.d/10-wordpress-hardening.conf
+RUN sed -i 's/\r$//' /opt/docker/etc/httpd/vhost.common.d/10-wordpress-hardening.conf
+
 COPY docker/wordpress-entrypoint.sh /usr/local/bin/wordpress-entrypoint.sh
 RUN chmod +x /usr/local/bin/wordpress-entrypoint.sh \
     && sed -i 's/\r$//' /usr/local/bin/wordpress-entrypoint.sh

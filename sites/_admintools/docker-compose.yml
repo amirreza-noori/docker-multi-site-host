@@ -1,31 +1,34 @@
+# Admin tools — localhost only (SSH tunnel). Do not publish on 0.0.0.0 or public HAProxy.
 services:
   portainer:
-    image: portainer/portainer-ce:latest
+    image: portainer/portainer-ce:2.27.1
     container_name: portainer
     restart: always
+    ports:
+      - "127.0.0.1:9000:9000"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - portainer_data:/data
-    networks:
-      - www
 
   phpmyadmin:
-    image: phpmyadmin/phpmyadmin:latest
+    image: phpmyadmin/phpmyadmin:5.2.2
     container_name: phpmyadmin
     restart: always
+    ports:
+      - "127.0.0.1:8081:80"
     environment:
-      PMA_ARBITRARY: "1"
+      PMA_HOST: mariadb
+      PMA_ABSOLUTE_URI: http://127.0.0.1:8081/
+      # Only the shared MariaDB — no arbitrary remote servers
+      PMA_ARBITRARY: "0"
     networks:
       - database
       - database-monitor
-      - www
 
 volumes:
   portainer_data:
 
 networks:
-  www:
-    name: www
   database:
     name: database
   database-monitor:
