@@ -75,11 +75,16 @@ if [ -d "$OC" ]; then
   exit 1
 fi
 
-# Ensure uploads cannot execute PHP even on sites created before the template .htaccess existed
+# uploads is bind-mounted — enforce at every start (Dockerfile cannot write the host mount).
+# 1) remove nested/infected .htaccess + any PHP/scripts under uploads (webshells)
+# 2) install a known-good root .htaccess owned by root (Apache also denies PHP here)
 UPLOADS_HTACCESS="${WP_CONTENT}/uploads/.htaccess"
-if [ ! -f "${UPLOADS_HTACCESS}" ]; then
-  printf '%s\n' "${UPLOADS_HTACCESS_BODY}" > "${UPLOADS_HTACCESS}"
-fi
+find "${WP_CONTENT}/uploads" -type f -name '.htaccess' -delete 2>/dev/null || true
+find "${WP_CONTENT}/uploads" -type f \( \
+  -iname '*.php' -o -iname '*.phtml' -o -iname '*.phar' \
+  -o -iname '*.php3' -o -iname '*.php4' -o -iname '*.php5' -o -iname '*.php7' -o -iname '*.php8' \
+\) -delete 2>/dev/null || true
+printf '%s\n' "${UPLOADS_HTACCESS_BODY}" > "${UPLOADS_HTACCESS}"
 
 # PHP must be able to create a file in wp-content or WordPress selects FTP and admin calls 500.
 # Plugins and themes stay root-owned so wp-admin cannot change code.
