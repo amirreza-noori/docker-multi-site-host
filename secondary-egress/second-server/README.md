@@ -166,3 +166,19 @@ Stop the service before a manual run — only one process can bind the forwarded
 sudo systemctl stop reverse-tunnel
 sudo /bin/bash /usr/local/bin/reverse-tunnel.sh
 ```
+
+### `503 Too many open connections` via `secondary-egress:8118`
+
+Privoxy client limit (default `128`). Restart, or set in `/etc/privoxy/config` and restart:
+
+```
+max-client-connections 512
+keep-alive-timeout 5
+socket-timeout 30
+```
+
+```bash
+sudo systemctl restart privoxy
+```
+
+See also `../README.md` (Inbound: `503 Too many open connections`).

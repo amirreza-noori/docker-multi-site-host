@@ -132,6 +132,34 @@ nc -zv 127.0.0.1 18118   # on Docker host
 curl -x http://127.0.0.1:18118 -I https://example.com
 ```
 
+### Inbound: `503 Too many open connections`
+
+Privoxy on the second server hit its client limit (default `128`). Restart clears stuck sockets:
+
+```bash
+# on second server
+ss -tn sport = :8118 | wc -l
+sudo systemctl restart privoxy
+```
+
+Raise the limit in `/etc/privoxy/config` (see `second-server/privoxy.example.config`), then restart:
+
+```
+max-client-connections 512
+keep-alive-timeout 5
+socket-timeout 30
+```
+
+```bash
+sudo systemctl restart privoxy
+```
+
+Verify from a container on `www`:
+
+```bash
+docker run --rm --network www curlimages/curl -x http://secondary-egress:8118 -I https://example.com
+```
+
 ### Outbound: `secondary-egress` restart loop
 
 Failed SOCKS setup restarts the container and may trigger fail2ban. Whitelist the Docker host IP or use inbound mode.
