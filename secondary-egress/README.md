@@ -9,7 +9,7 @@ http://secondary-egress:8118
 ## Modes
 
 | Mode | Who initiates SSH | `secondary-egress:8118` |
-|------|-------------------|---------------------------|
+| ------ | ------------------- | --------------------------- |
 | **outbound** (`SECOND_IP_EGRESS_MODE=outbound`) | Docker host → second server | Privoxy + SOCKS inside the container |
 | **inbound** (`SECOND_IP_EGRESS_MODE=inbound`) | Second server → Docker host | HAProxy forwards to Privoxy on the second server via reverse tunnel |
 
@@ -63,17 +63,9 @@ SECOND_IP_INBOUND_PROXY_PORT=18118
 
 `SECOND_IP_REVERSE_PORTS` in `.env` is **not used in inbound mode**. Set the equivalent list as `TUNNEL_REVERSE_PORTS` in `/etc/reverse-tunnel.env` on the second server (see `second-server/README.md`). Use `127.0.0.1` or a host IP for targets — Docker container names are not resolved by the Docker host `sshd`.
 
-### 2. Docker host `sshd`
+### 2. Docker host SSH
 
-```ini
-GatewayPorts clientspecified
-```
-
-```bash
-sudo systemctl restart ssh
-```
-
-Add the second server's SSH public key to `authorized_keys` on the Docker host.
+Add the second server's SSH public key to `authorized_keys` on the Docker host and configure `GatewayPorts clientspecified`. For SSH keepalives, Fail2ban allowlisting, connection checks, and restart guidance, see [SSH tunnel reliability](ssh-tunnel-reliability.md).
 
 ### 3. Second server
 
