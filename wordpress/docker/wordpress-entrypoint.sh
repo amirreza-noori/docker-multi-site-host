@@ -20,6 +20,14 @@ UPLOADS_HTACCESS_BODY='# Deny script execution under uploads (webshells)
 Options -ExecCGI
 RemoveHandler .php .phtml .php3 .php4 .php5 .php7 .php8 .phar
 RemoveType .php .phtml .php3 .php4 .php5 .php7 .php8 .phar
+
+# Missing media: plain 404 from Apache instead of booting WordPress
+<IfModule mod_rewrite.c>
+RewriteEngine On
+RewriteOptions Inherit
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteRule .* - [R=404,L]
+</IfModule>
 '
 
 if [ ! -f "${WP_CONFIG}" ] && [ -f "${WP_PATH}/wp-config-sample.php" ]; then

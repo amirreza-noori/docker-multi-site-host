@@ -1,3 +1,5 @@
 *.sh text eol=lf
 secondary-egress/** text eol=lf
 .gitattributes text eol=lf
+sites/_template_wordpress/etc/crontab text eol=lf
+sites/_template_wordpress/.htaccess text eol=lf

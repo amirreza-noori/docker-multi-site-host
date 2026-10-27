@@ -18,7 +18,11 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get install -y --no-install-recommends unzip; \
     rm -rf /var/lib/apt/lists/*; \
     pecl install timezonedb; \
-    pecl install igbinary
+    pecl install igbinary; \
+    pecl install brotli
+
+# Apache mod_brotli — W3TC writes BROTLI_COMPRESS rules guarded by <IfModule mod_brotli.c>
+RUN a2enmod brotli
 
 # Pinned release — rebuild image to upgrade core (sites block wordpress.org)
 ARG WORDPRESS_VERSION=7.1.2
