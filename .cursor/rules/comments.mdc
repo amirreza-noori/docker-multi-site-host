@@ -25,10 +25,10 @@ No comment if the name, structure, or config key is already clear.
 
 ```yaml
 # ❌ Old single-server values were 150 — reduced because we hit OOM
-fpm.pool.pm.max_children=20
+fpm.pool.pm.max_children=10
 
 # ✅ PHP-FPM pool sizing for this site container (see compose mem_limit)
-fpm.pool.pm.max_children=20
+fpm.pool.pm.max_children=10
 ```
 
 ```cfg

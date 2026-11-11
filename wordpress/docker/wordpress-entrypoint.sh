@@ -65,6 +65,7 @@ ensure_readable_mount() {
 mkdir -p \
   "${WP_CONTENT}/themes" \
   "${WP_CONTENT}/plugins" \
+  "${WP_CONTENT}/mu-plugins" \
   "${WP_CONTENT}/uploads" \
   "${WP_CONTENT}/languages" \
   "${WP_CONTENT}/cache" \
@@ -102,19 +103,26 @@ for path in "${WP_CONTENT}"/*; do
   [ -e "${path}" ] || continue
   base="$(basename "${path}")"
   case "${base}" in
-    uploads|cache|w3tc-config) continue ;;
+    uploads|cache|w3tc-config|upgrade) continue ;;
     advanced-cache.php|object-cache.php|db.php|sunrise.php) continue ;;
   esac
   chown -R root:root "${path}" || true
   chmod -R u=rwX,go=rX "${path}" || true
 done
 
-# Media library, disk cache files, and W3TC config (master.php)
-for d in uploads cache w3tc-config; do
-  target="${WP_CONTENT}/${d}"
+# Runtime trees PHP must write (media year/month dirs, cache, W3TC, upgrade temp)
+# Directory ownership is enough for new uploads; avoid chmod every file on large media trees.
+ensure_php_writable_dir_tree() {
+  target=$1
   mkdir -p "${target}"
-  chown -R application:application "${target}" || true
-  chmod -R u=rwX,g=rwX,o=rX "${target}" || true
+  chown application:application "${target}" || true
+  find "${target}" -type d -exec chown application:application {} + 2>/dev/null || \
+    chown -R application:application "${target}" || true
+  find "${target}" -type d -exec chmod 775 {} + 2>/dev/null || true
+}
+
+for d in uploads cache w3tc-config upgrade; do
+  ensure_php_writable_dir_tree "${WP_CONTENT}/${d}"
 done
 for f in advanced-cache.php object-cache.php db.php sunrise.php; do
   if [ -f "${WP_CONTENT}/${f}" ]; then
@@ -122,12 +130,32 @@ for f in advanced-cache.php object-cache.php db.php sunrise.php; do
     chmod 644 "${WP_CONTENT}/${f}" || true
   fi
 done
-# Sticky on uploads: PHP can replace its own files, not the root-owned script block
+# Sticky on uploads: PHP can create files; only owner/root can delete others' files (protects root .htaccess)
 if [ -f "${UPLOADS_HTACCESS}" ]; then
   chown root:root "${UPLOADS_HTACCESS}" || true
   chmod 644 "${UPLOADS_HTACCESS}" || true
 fi
 chmod 1775 "${WP_CONTENT}/uploads" || true
+
+# Fail loud if media library would be broken after rebuild
+uploads_write_test() {
+  gosu application bash -c "touch '${WP_CONTENT}/uploads/.wp-write-test' && rm -f '${WP_CONTENT}/uploads/.wp-write-test'"
+}
+if ! uploads_write_test; then
+  echo "WARN: uploads not writable — forcing recursive chown" >&2
+  chown -R application:application "${WP_CONTENT}/uploads" || true
+  find "${WP_CONTENT}/uploads" -type d -exec chmod 775 {} + 2>/dev/null || true
+  chmod 1775 "${WP_CONTENT}/uploads" || true
+  if [ -f "${UPLOADS_HTACCESS}" ]; then
+    chown root:root "${UPLOADS_HTACCESS}" || true
+    chmod 644 "${UPLOADS_HTACCESS}" || true
+  fi
+fi
+if ! uploads_write_test; then
+  echo "ERROR: ${WP_CONTENT}/uploads is not writable by application — media uploads will fail" >&2
+  ls -la "${WP_CONTENT}/uploads" >&2 || true
+  exit 1
+fi
 
 ensure_readable_mount "${WP_CONFIG}"
 ensure_readable_mount "${WP_PATH}/.htaccess"

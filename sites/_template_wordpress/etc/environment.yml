@@ -7,13 +7,13 @@ CLI_SCRIPT=php /app/index.php
 
 # PHP-FPM pool sizing (align with docker-compose mem_limit, typically 1g)
 fpm.global.process_control_timeout=10m
-fpm.global.process.max=50
+fpm.global.process.max=30
 
 fpm.pool.pm=dynamic
-fpm.pool.pm.max_children=20
-fpm.pool.pm.start_servers=6
-fpm.pool.pm.min_spare_servers=4
-fpm.pool.pm.max_spare_servers=12
-fpm.pool.pm.process_idle_timeout=5m
-fpm.pool.pm.max_requests=1000
-fpm.pool.request_terminate_timeout=5m
+fpm.pool.pm.max_children=10
+fpm.pool.pm.start_servers=3
+fpm.pool.pm.min_spare_servers=2
+fpm.pool.pm.max_spare_servers=6
+fpm.pool.pm.process_idle_timeout=1m
+fpm.pool.pm.max_requests=500
+fpm.pool.request_terminate_timeout=60s
