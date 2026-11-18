@@ -16,7 +16,7 @@ alwaysApply: true
 - **Networks:** `database` = MariaDB, WordPress, backup-runner, phpMyAdmin. `database-monitor` = extra network on phpMyAdmin only; external DBs for inspection join this network, not `database`.
 - **_admintools:** Portainer + phpMyAdmin on `127.0.0.1` only (SSH tunnel); not on public HAProxy. `PMA_ARBITRARY=0`, `PMA_HOST=mariadb`.
 - **WordPress hardening:** core 444/555; deny `xmlrpc.php` and PHP under `uploads` (Apache vhost + `.htaccess`); `disable_functions` in template `php.ini`; entrypoint keeps the `wp-content` directory writable by the PHP user so WordPress selects the direct filesystem. Writable trees are `uploads` (all year/month dirs), `cache`, `w3tc-config`, and `upgrade`, plus existing drop-ins. Plugins and themes stay root-owned. Entrypoint aborts if `application` cannot write `uploads`.
-- **Origin load:** template ships `wp-content/mu-plugins/origin-load-guard.php` (disable Action Scheduler ajax runners; dequeue Woo cart fragments off cart/checkout). FPM defaults: `max_children=10`, `request_terminate_timeout=60s` for ~1g `mem_limit`.
+- **Origin load:** template ships `wp-content/mu-plugins/origin-load-guard.php` (disable Action Scheduler ajax runners; dequeue Woo cart fragments off cart/checkout). FPM defaults: `max_children=10`, `request_terminate_timeout=60s` for ~1g `mem_limit`. High-capacity samples: `etc/php.high-capacity.ini`, `etc/environment.high-capacity.yml`, `docker-compose.high-capacity.snippet.yml`.
 
 ## haproxy.cfg (per site)
 

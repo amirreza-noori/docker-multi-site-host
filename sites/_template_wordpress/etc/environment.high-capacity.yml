@@ -1,0 +1,20 @@
+# High-capacity sample — use as env_file instead of environment.yml for a primary
+# site (~0.7 of 56 CPUs, mem_limit 28g, php memory_limit 256M).
+# Pair with php.high-capacity.ini and docker-compose.high-capacity.snippet.yml.
+# Raise MariaDB max_connections (>=200) when using max_children=100.
+
+WEB_DOCUMENT_ROOT=/app
+WEB_DOCUMENT_INDEX=index.php
+CLI_SCRIPT=php /app/index.php
+
+fpm.global.process_control_timeout=10m
+fpm.global.process.max=150
+
+fpm.pool.pm=dynamic
+fpm.pool.pm.max_children=100
+fpm.pool.pm.start_servers=25
+fpm.pool.pm.min_spare_servers=12
+fpm.pool.pm.max_spare_servers=50
+fpm.pool.pm.process_idle_timeout=5m
+fpm.pool.pm.max_requests=500
+fpm.pool.request_terminate_timeout=5m
